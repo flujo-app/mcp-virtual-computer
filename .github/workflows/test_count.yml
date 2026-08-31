@@ -1,0 +1,48 @@
+name: Test Count And Coverage
+
+on:
+  push:
+    branches:
+      - main # Adjust this if your main branch has a different name
+
+jobs:
+  count_tests:
+    name: Count Tests
+    runs-on: ubuntu-latest
+    env:
+      GIST_SECRET: ${{ secrets.GIST_SECRET }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install the project
+        run: uv sync --all-extras --dev
+
+      - name: Count Python tests
+        run: |
+          PYTHON_TEST_COUNT=$(uv run python3 -m pytest --collect-only -q . | grep "tests collected" | awk '{print $1}' | sed 's/[^0-9]//g')
+          echo "PYTHON_TEST_COUNT=$PYTHON_TEST_COUNT" >> $GITHUB_ENV
+
+      - name: Create test count badge
+        if: env.GIST_SECRET != ''
+        continue-on-error: true
+        uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
+        with:
+          auth: ${{ env.GIST_SECRET }}
+          gistID: 9f8457cc9d44ab16ff8b9f1a977d25bb
+          filename: test_count_kiln.json
+          label: Test Count
+          message: ${{ env.PYTHON_TEST_COUNT }}
+          color: brightgreen
+
+      - name: Add test count to job summary
+        run: echo "Collected $PYTHON_TEST_COUNT Python tests." >> "$GITHUB_STEP_SUMMARY"
+

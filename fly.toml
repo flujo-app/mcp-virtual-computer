@@ -1,0 +1,35 @@
+app = "mcp-sandbox-computer-vm-for-ai"
+primary_region = "gru"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[processes]
+  app = "--transport http --host 0.0.0.0 --port 8080 --backend fly"
+
+[env]
+  FLY_APP_NAME = "mcp-sandbox-computer-vm-for-ai"
+
+[http_service]
+  internal_port = 8080
+  processes = ["app"]
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 50
+    hard_limit = 100
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "3s"
+  grace_period = "20s"
+  method = "GET"
+  path = "/healthz"

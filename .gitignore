@@ -1,0 +1,12 @@
+.claude
+*.egg-info/
+src/*.egg-info/
+
+__pycache__/
+*.py[cod]
+build/
+dist/
+.env
+.coverage
+.tools/
+

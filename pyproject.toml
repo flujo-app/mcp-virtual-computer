@@ -1,0 +1,99 @@
+[project]
+name = "mcp-sandbox-computer-vm-for-ai"
+version = "0.2.2"
+description = "Named Docker and Fly Machine sandbox computers with an MCP App dashboard"
+authors = [
+  {name = "Steve Cosman, Chesterfield Laboratories Inc", email = "scosman@users.noreply.github.com"}
+]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Intended Audience :: Developers",
+]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "e2b>=2.13.2",
+    "mcp>=1.26.0,<2",
+    "modal>=1.3.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/flujo-app/mcp-sandbox-computer-vm-for-ai"
+Repository = "https://github.com/flujo-app/mcp-sandbox-computer-vm-for-ai"
+Issues = "https://github.com/flujo-app/mcp-sandbox-computer-vm-for-ai/issues"
+Upstream = "https://github.com/Kiln-AI/Kilntainers"
+
+
+
+[project.optional-dependencies]
+wasm = ["wasmtime>=41.0.0"]
+all = ["mcp-sandbox-computer-vm-for-ai[wasm]"]
+
+[project.scripts]
+kilntainers = "kilntainers.cli:main"
+mcp-sandbox-computer = "kilntainers.cli:main"
+mcp-sandbox-computer-vm-for-ai = "kilntainers.cli:main"
+
+[project.entry-points."kilntainers.backends"]
+docker = "kilntainers.backends.docker:DockerBackend"
+modal = "kilntainers.backends.modal:ModalBackend"
+wasm = "kilntainers.backends.wasm:WasmBackend"
+go_busybox = "kilntainers.backends.wasm:GoBusyBoxBackend"
+e2b = "kilntainers.backends.e2b:E2BBackend"
+fly = "kilntainers.backends.fly:FlyBackend"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kilntainers"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/kilntainers/dashboard.html" = "kilntainers/dashboard.html"
+
+[tool.hatch.build.targets.wasm-data]
+include = ["src/kilntainers/backends/wasm_data/*.wasm"]
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+
+[tool.setuptools.package-data]
+"kilntainers.backends.wasm_data" = ["*.wasm"]
+"kilntainers" = ["dashboard.html"]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.13.4",
+    "diff-cover>=10.2.0",
+    "dotenv>=0.9.9",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=0.26.0",
+    "pytest-cov>=7.0.0",
+    "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.6.0",
+    "ruff==0.15.4",
+    "ty==0.0.20",
+    "wasmtime>=41.0.0",
+]
+
+[tool.ty.src]
+exclude = ["**/.venv", "build"]
+
+[tool.ruff]
+exclude = []
+
+[tool.ruff.lint]
+# I is import sorting
+# F401 is unused imports
+# RUF is ruff rules. In particular 012+008 are mutable defaults (important)
+select = ["E4", "E7", "E9", "F"]
+extend-select = ["I","F401","RUF","TID"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+timeout = 65
+timeout_method = "thread"
+markers = [
+    "integration: marks integration tests that require a backend (deselect with '-m \"not integration\"')",
+    "e2e: marks end-to-end tests that run full server lifecycles (deselect with '-m \"not e2e\"')",
+    "http_integration: marks HTTP transport integration tests (deselect with '-m \"not http_integration\"')",
+]

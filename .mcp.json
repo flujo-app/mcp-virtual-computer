@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "hooks_mcp": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "hooks-mcp"
+      ],
+      "env": {}
+    },
+    "kilntainers": {
+      "type": "stdio",
+      "command": "kilntainers",
+      "args": [],
+      "env": {}
+    }
+  }
+}

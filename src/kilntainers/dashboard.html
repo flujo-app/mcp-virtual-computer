@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Sandbox Computers</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #08110f;
+    --panel: #0d1916;
+    --panel-2: #11231e;
+    --line: #234239;
+    --text: #e6f5ef;
+    --muted: #8eb0a4;
+    --green: #54d69b;
+    --green-2: #1f9d70;
+    --amber: #f3b65c;
+    --red: #ff7f79;
+    --blue: #75b8ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); }
+  body { font: 13px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  button, input, textarea, select { font: inherit; }
+  button, input, textarea, select { border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: #0a1512; }
+  button { cursor: pointer; min-height: 34px; padding: 7px 12px; font-weight: 650; }
+  button:hover:not(:disabled) { border-color: var(--green-2); background: #10251e; }
+  button:disabled { opacity: .5; cursor: wait; }
+  input, select { height: 36px; padding: 7px 10px; }
+  textarea { width: 100%; padding: 10px; resize: vertical; }
+  .shell { width: 100%; min-height: 520px; padding: 18px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+  .brand { display: flex; align-items: center; gap: 11px; }
+  .mark { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 11px; color: #06100d; background: linear-gradient(135deg, #72e8b3, #2ca878); font-size: 20px; box-shadow: 0 8px 28px #1d8f6455; }
+  h1, h2, p { margin: 0; }
+  h1 { font-size: 18px; letter-spacing: -.02em; }
+  h2 { font-size: 14px; }
+  .subtitle, .muted { color: var(--muted); }
+  .status { min-height: 20px; color: var(--muted); text-align: right; }
+  .status.error { color: var(--red); }
+  .toolbar { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto auto; gap: 8px; margin-bottom: 14px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+  .check { display: flex; align-items: center; gap: 7px; padding: 0 5px; color: var(--muted); white-space: nowrap; }
+  .check input { width: 16px; height: 16px; accent-color: var(--green); }
+  .primary { color: #03130d; border-color: #4bd39a; background: var(--green); }
+  .primary:hover:not(:disabled) { color: #03130d; background: #7ce8b8; }
+  .danger { color: var(--red); }
+  .grid { display: grid; grid-template-columns: minmax(360px, .9fr) minmax(420px, 1.1fr); gap: 14px; align-items: stretch; }
+  .panel { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 48px; padding: 10px 13px; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+  .count { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 22px; padding: 0 7px; border-radius: 999px; color: var(--green); background: #153b2e; }
+  .inventory { min-height: 390px; max-height: 580px; overflow: auto; padding: 8px; }
+  .empty { display: grid; place-items: center; min-height: 280px; padding: 28px; text-align: center; color: var(--muted); }
+  .computer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 11px; border: 1px solid transparent; border-radius: 9px; }
+  .computer + .computer { border-top-color: #19352d; border-top-left-radius: 0; border-top-right-radius: 0; }
+  .computer.selected { border-color: #2ca878; background: #10261f; }
+  .computer-name { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font: 700 13px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #71847d; box-shadow: 0 0 0 3px #71847d22; }
+  .dot.running, .dot.started { background: var(--green); box-shadow: 0 0 0 3px #54d69b22; }
+  .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+  .pill { display: inline-block; margin-left: 5px; padding: 1px 6px; border-radius: 999px; color: var(--amber); background: #3a2c16; }
+  .pill.permanent { color: var(--blue); background: #152d45; }
+  .actions { display: flex; align-items: center; gap: 5px; }
+  .actions button { min-height: 29px; padding: 4px 8px; font-size: 11px; }
+  .terminal { display: flex; min-height: 438px; flex-direction: column; }
+  .terminal-controls { display: grid; grid-template-columns: minmax(140px, 1fr) auto; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
+  #output { flex: 1 1 auto; min-height: 280px; max-height: 430px; overflow: auto; margin: 0; padding: 13px; color: #c9f7df; background: #030806; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .command { padding: 10px; border-top: 1px solid var(--line); }
+  #command { min-height: 76px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .command-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
+  kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 4px; color: var(--muted); background: #101d19; font-size: 10px; }
+  @media (max-width: 860px) {
+    .shell { padding: 10px; }
+    .grid { grid-template-columns: 1fr; }
+    .toolbar { grid-template-columns: 1fr auto; }
+    .toolbar .check { grid-row: 2; }
+  }
+</style>
+</head>
+<body>
+<main class="shell">
+  <header>
+    <div class="brand">
+      <div class="mark">⌁</div>
+      <div><h1>Sandbox Computers</h1><p class="subtitle">Docker containers and Fly Machines, one lifecycle.</p></div>
+    </div>
+    <div id="status" class="status">Connecting to MCP…</div>
+  </header>
+
+  <section class="toolbar" aria-label="Create computer">
+    <input id="new-id" aria-label="New computer ID" placeholder="computer-id (leave blank for a random slug)" />
+    <label class="check"><input id="temporary" type="checkbox" checked /> Temporary</label>
+    <button id="create" class="primary" type="button">Create computer</button>
+    <button id="refresh" type="button">Refresh</button>
+  </section>
+
+  <div class="grid">
+    <section class="panel">
+      <div class="panel-head"><h2>Computers</h2><span id="count" class="count">0</span></div>
+      <div id="inventory" class="inventory"><div class="empty">Loading computers…</div></div>
+    </section>
+
+    <section class="panel terminal">
+      <div class="panel-head"><h2>Terminal command</h2><span id="target-label" class="muted">Select a computer</span></div>
+      <div class="terminal-controls">
+        <select id="target" aria-label="Target computer"><option value="">Select a computer…</option></select>
+        <button id="clear" type="button">Clear output</button>
+      </div>
+      <pre id="output">Choose a computer, enter a command, and run it.</pre>
+      <div class="command">
+        <textarea id="command" spellcheck="false" aria-label="Shell command" placeholder="uname -a && pwd && ls -la"></textarea>
+        <div class="command-row"><span class="muted"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> to run</span><button id="run" class="primary" type="button">Run command</button></div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var PROTOCOL_VERSION = "2026-01-26";
+  var nextId = 1;
+  var pending = {};
+  var computers = [];
+  var selectedId = "";
+  var busy = false;
+
+  var statusEl = document.getElementById("status");
+  var inventoryEl = document.getElementById("inventory");
+  var countEl = document.getElementById("count");
+  var targetEl = document.getElementById("target");
+  var targetLabelEl = document.getElementById("target-label");
+  var outputEl = document.getElementById("output");
+  var commandEl = document.getElementById("command");
+
+  function post(message) { window.parent.postMessage(message, "*"); }
+  function rpc(method, params) {
+    return new Promise(function (resolve, reject) {
+      var id = nextId++;
+      pending[id] = { resolve: resolve, reject: reject };
+      post({ jsonrpc: "2.0", id: id, method: method, params: params || {} });
+    });
+  }
+  function notify(method, params) { post({ jsonrpc: "2.0", method: method, params: params || {} }); }
+  function payloadOf(result) {
+    if (!result) return {};
+    if (result.structuredContent) return result.structuredContent;
+    try {
+      var text = result.content && result.content[0] && result.content[0].text;
+      return text ? JSON.parse(text) : {};
+    } catch (error) { return {}; }
+  }
+  async function callTool(name, args) {
+    var result = await rpc("tools/call", { name: name, arguments: args || {} });
+    var data = payloadOf(result);
+    if (result && result.isError) throw new Error(data.error || name + " failed");
+    return data;
+  }
+  function setStatus(message, isError) {
+    statusEl.textContent = message;
+    statusEl.className = isError ? "status error" : "status";
+  }
+  function escapeText(value) { return String(value == null ? "" : value); }
+  function selectedComputer() {
+    return computers.find(function (item) { return item.computer_id === selectedId; }) || null;
+  }
+  function setBusy(value) {
+    busy = value;
+    Array.prototype.forEach.call(document.querySelectorAll("button"), function (button) { button.disabled = value; });
+  }
+  function render() {
+    countEl.textContent = String(computers.length);
+    inventoryEl.textContent = "";
+    targetEl.textContent = "";
+    var placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = computers.length ? "Select a computer…" : "No computers available";
+    targetEl.appendChild(placeholder);
+
+    if (!computers.length) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "No computers yet. Create a temporary workspace or a permanent computer above.";
+      inventoryEl.appendChild(empty);
+      selectedId = "";
+    }
+
+    computers.forEach(function (item) {
+      var option = document.createElement("option");
+      option.value = item.computer_id;
+      option.textContent = item.computer_id + " · " + item.state;
+      targetEl.appendChild(option);
+
+      var row = document.createElement("div");
+      row.className = "computer" + (item.computer_id === selectedId ? " selected" : "");
+      row.dataset.id = item.computer_id;
+
+      var info = document.createElement("div");
+      var name = document.createElement("div");
+      name.className = "computer-name";
+      var dot = document.createElement("span");
+      dot.className = "dot " + escapeText(item.state).toLowerCase();
+      var nameText = document.createElement("span");
+      nameText.textContent = item.computer_id;
+      var pill = document.createElement("span");
+      pill.className = "pill" + (item.temporary ? "" : " permanent");
+      pill.textContent = item.temporary ? "temporary" : "permanent";
+      name.appendChild(dot); name.appendChild(nameText); name.appendChild(pill);
+      var meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = [item.backend, item.state, item.image || "default image", item.sandbox_id].join(" · ");
+      info.appendChild(name); info.appendChild(meta);
+
+      var actions = document.createElement("div");
+      actions.className = "actions";
+      [["restart", "Restart"], ["reset", "Reset"], ["delete", "Delete"]].forEach(function (entry) {
+        var button = document.createElement("button");
+        button.type = "button";
+        button.dataset.action = entry[0];
+        button.dataset.id = item.computer_id;
+        button.textContent = entry[1];
+        if (entry[0] === "delete") button.className = "danger";
+        actions.appendChild(button);
+      });
+      row.appendChild(info); row.appendChild(actions);
+      row.addEventListener("click", function (event) {
+        if (event.target && event.target.dataset && event.target.dataset.action) return;
+        selectedId = item.computer_id;
+        render();
+      });
+      inventoryEl.appendChild(row);
+    });
+
+    if (selectedId && !selectedComputer()) selectedId = "";
+    targetEl.value = selectedId;
+    targetLabelEl.textContent = selectedId || "Select a computer";
+  }
+  async function refresh(silent) {
+    try {
+      if (!silent) setStatus("Refreshing…", false);
+      var data = await callTool("computer_list", {});
+      computers = Array.isArray(data.computers) ? data.computers : [];
+      render();
+      setStatus(computers.length + (computers.length === 1 ? " computer" : " computers"), false);
+    } catch (error) { setStatus(error.message || String(error), true); }
+  }
+  async function createComputer() {
+    var id = document.getElementById("new-id").value.trim();
+    var args = { temporary: document.getElementById("temporary").checked };
+    if (id) args.computer_id = id;
+    setBusy(true); setStatus("Creating computer…", false);
+    try {
+      var data = await callTool("computer_create", args);
+      selectedId = data.computer_id || id;
+      document.getElementById("new-id").value = "";
+      await refresh(true);
+      setStatus("Computer " + selectedId + " is ready.", false);
+    } catch (error) { setStatus(error.message || String(error), true); }
+    finally { setBusy(false); }
+  }
+  async function lifecycle(action, id) {
+    var tool = action === "restart" ? "computer_restart" : action === "reset" ? "computer_factory_reset" : "computer_delete";
+    if (action === "reset" && !window.confirm("Factory reset " + id + "? All files and changes in this computer will be erased.")) return;
+    if (action === "delete" && !window.confirm("Permanently delete " + id + "? This cannot be undone.")) return;
+    setBusy(true); setStatus((action === "reset" ? "Resetting " : action === "delete" ? "Deleting " : "Restarting ") + id + "…", false);
+    try {
+      await callTool(tool, { computer_id: id });
+      if (action === "delete" && selectedId === id) selectedId = "";
+      await refresh(true);
+      setStatus(id + (action === "delete" ? " deleted." : action === "reset" ? " reset." : " restarted."), false);
+    } catch (error) { setStatus(error.message || String(error), true); }
+    finally { setBusy(false); }
+  }
+  async function runCommand() {
+    var computer = selectedComputer();
+    var command = commandEl.value;
+    if (!computer) { setStatus("Select a target computer first.", true); return; }
+    if (!command.trim()) { setStatus("Enter a command first.", true); return; }
+    setBusy(true); setStatus("Running on " + computer.computer_id + "…", false);
+    outputEl.textContent += "\n\n$ " + command + "\n";
+    outputEl.scrollTop = outputEl.scrollHeight;
+    try {
+      var data = await callTool("terminal_execute", {
+        computer_id: computer.computer_id,
+        temporary: computer.temporary,
+        command: command
+      });
+      if (data.stdout) outputEl.textContent += data.stdout;
+      if (data.stderr) outputEl.textContent += data.stderr;
+      outputEl.textContent += "\n[exit " + data.exit_code + " · " + data.exec_duration_ms + " ms]";
+      setStatus("Command finished with exit " + data.exit_code + ".", data.exit_code !== 0);
+    } catch (error) {
+      outputEl.textContent += "\n[error] " + (error.message || String(error));
+      setStatus(error.message || String(error), true);
+    } finally {
+      outputEl.scrollTop = outputEl.scrollHeight;
+      setBusy(false);
+    }
+  }
+
+  document.getElementById("create").addEventListener("click", createComputer);
+  document.getElementById("refresh").addEventListener("click", function () { if (!busy) refresh(false); });
+  document.getElementById("run").addEventListener("click", runCommand);
+  document.getElementById("clear").addEventListener("click", function () { outputEl.textContent = ""; });
+  targetEl.addEventListener("change", function () { selectedId = targetEl.value; render(); });
+  commandEl.addEventListener("keydown", function (event) {
+    if (event.ctrlKey && event.key === "Enter") { event.preventDefault(); runCommand(); }
+  });
+  inventoryEl.addEventListener("click", function (event) {
+    var target = event.target;
+    if (!target || !target.dataset || !target.dataset.action) return;
+    lifecycle(target.dataset.action, target.dataset.id);
+  });
+  window.addEventListener("message", function (event) {
+    var message = event.data;
+    if (!message || message.jsonrpc !== "2.0") return;
+    if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) {
+      var waiting = pending[message.id];
+      if (!waiting) return;
+      delete pending[message.id];
+      if (message.error) waiting.reject(new Error(message.error.message || "RPC error"));
+      else waiting.resolve(message.result);
+      return;
+    }
+    if (message.method === "ui/notifications/tool-result") {
+      var result = message.params && message.params.result ? message.params.result : message.params;
+      var data = payloadOf(result);
+      if (Array.isArray(data.computers)) { computers = data.computers; render(); }
+      return;
+    }
+    if (message.method === "ping" && message.id !== undefined) { post({ jsonrpc: "2.0", id: message.id, result: {} }); return; }
+    if (message.method === "ui/resource-teardown" && message.id !== undefined) { post({ jsonrpc: "2.0", id: message.id, result: {} }); }
+  });
+
+  rpc("ui/initialize", {
+    appInfo: { name: "sandbox-computer-dashboard", version: "1.0.0" },
+    appCapabilities: { availableDisplayModes: ["inline", "fullscreen", "pip"] },
+    protocolVersion: PROTOCOL_VERSION
+  }).then(function () {
+    notify("ui/notifications/initialized", {});
+    setStatus("Connected", false);
+    refresh(true);
+  }).catch(function (error) { setStatus("MCP App initialization failed: " + (error.message || String(error)), true); });
+})();
+</script>
+</body>
+</html>

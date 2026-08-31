@@ -1,0 +1,64 @@
+# HooksMCP Configuration File for use with Kiln
+# https://github.com/scosman/hooks_mcp
+
+actions:
+  - name: "check_all"
+    description: "Run all checks on the project. This is slow. Prefer specific checks when iterating, use this for final check that all checks pass."
+    command: "uv run ./checks.sh"
+
+  - name: "all_python_tests"
+    description: "Run all python tests in the project (but skips slow docker integration tests)"
+    command: "uv run python -m pytest --benchmark-quiet -q -m 'not docker_integration' -n auto ."
+
+  - name: "all_python_tests_including_paid"
+    description: "Run all python tests including paid API tests (costs money!)"
+    command: "uv run python -m pytest --benchmark-quiet -q --runpaid ."
+
+  - name: "docker_integration_tests"
+    description: "Run only docker integration tests (requires Docker daemon, Podman daemon, slow). Only run this if changing docker integration tests or docker backend code."
+    command: "uv run python -m pytest --benchmark-quiet -v -m docker_integration -n auto ."
+
+  - name: "lint_python"
+    description: "Lint the python source code, checking for errors and warnings"
+    command: "uv run ruff check"
+
+  - name: "lint_fix_python"
+    description: "Lint the pythong source code, fixing errors and warnings which it can fix. Not all errors can be fixed automatically."
+    command: "uv run ruff check --fix"
+
+  - name: "check_format_python"
+    description: "Check if the python source code is formatted correctly"
+    command: "uv run ruff format --check src"
+
+  - name: "format_python"
+    description: "Format the python source code"
+    command: "uv run ruff format src"
+
+  - name: "typecheck_python"
+    description: "Typecheck the source code"
+    command: "uv run ty check"
+
+  - name: "test_file_python"
+    description: "Run tests in a specific python file or directory"
+    command: "uv run python -m pytest $TEST_PATH"
+    parameters:
+      - name: "TEST_PATH"
+        type: "project_file_path"
+        description: "Path to test file or directory"
+
+  - name: "test_specific_python"
+    description: "Run a specific python test by name"
+    command: "uv run python -m pytest $TEST_PATH -k $TEST_NAME"
+    parameters:
+      - name: "TEST_PATH"
+        type: "project_file_path"
+        description: "Path to test file or directory"
+        default: "./tests"
+      - name: "TEST_NAME"
+        type: "insecure_string"
+        description: "Name of the test to run"
+
+prompts:
+  - name: "python_test_guide.md"
+    description: "Guide for testing best practices for python code"
+    prompt-file: "agents/python_test_guide.md"
