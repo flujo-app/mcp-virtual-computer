@@ -23,7 +23,7 @@ A VM for your agent. And for you.
       "args": ["mcp-virtual-computer"],
       "env": {
         "COMPUTER_ID": "agent-workstation",
-        "DESKTOP_ENVIRONMENT": "false",
+        "DESKTOP_ENVIRONMENT": "true",
         "NETWORK_ACCESS": "true",
         "AUTO_INSTALL_DOCKER": "true",
         "EXPOSE_LIFECYCLE_TOOLS": "false"
@@ -32,6 +32,7 @@ A VM for your agent. And for you.
   }
 }
 ```
+<img width="807" height="787" alt="image" src="https://github.com/user-attachments/assets/1a8fe86f-fab4-49aa-8740-2e06044344af" />
 
 ## What it exposes
 
