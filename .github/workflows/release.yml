@@ -36,6 +36,9 @@ jobs:
       - name: Set up Python 3.13
         run: uv python install 3.13
 
+      - name: Install dashboard build dependencies
+        run: npm ci
+
       - name: Run release checks and build
         run: npm run check
 
