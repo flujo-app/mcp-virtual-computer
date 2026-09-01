@@ -11,7 +11,6 @@ import shlex
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -21,6 +20,9 @@ from typing import Any
 os.environ.setdefault("DISPLAY", ":99")
 os.environ.setdefault("NO_AT_BRIDGE", "0")
 os.environ.setdefault("GTK_MODULES", "atk-bridge")
+
+TERMINAL_SESSION_DIR = Path("/tmp/mcp-visible-terminal-session")
+TERMINAL_SESSION_TITLE = "MCP Terminal"
 
 
 def run(
@@ -413,6 +415,13 @@ def window_action(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "action": action, "window": window}
 
 
+def write_terminal_result(result_path: Path, result: dict[str, Any]) -> None:
+    """Publish a terminal result atomically so the caller never reads half JSON."""
+    temporary_path = result_path.with_name(f".{result_path.name}.tmp")
+    temporary_path.write_text(json.dumps(result), encoding="utf-8")
+    os.replace(temporary_path, result_path)
+
+
 def terminal_runner(payload_path: Path) -> int:
     """Run one process inside the visible terminal and atomically record its result."""
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
@@ -513,34 +522,169 @@ def terminal_runner(payload_path: Path) -> int:
             stderr += "\n[output truncated by MCP output limit]\n"
         if exit_code == 124:
             stderr += f"\nCommand timed out after {timeout} seconds.\n"
-        result_path.write_text(
-            json.dumps(
-                {
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "exit_code": exit_code,
-                    "exec_duration_ms": duration_ms,
-                }
-            ),
-            encoding="utf-8",
+        write_terminal_result(
+            result_path,
+            {
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": exit_code,
+                "exec_duration_ms": duration_ms,
+            },
         )
         sys.stdout.write(f"\n[exit {exit_code}]\n")
         sys.stdout.flush()
-        os.execv("/bin/bash", ["/bin/bash", "-i"])
-        return exit_code  # pragma: no cover
+        return exit_code
     except BaseException as error:
-        result_path.write_text(
-            json.dumps(
-                {
-                    "stdout": "",
-                    "stderr": str(error),
-                    "exit_code": 1,
-                    "exec_duration_ms": int((time.monotonic() - started) * 1000),
-                }
-            ),
-            encoding="utf-8",
+        write_terminal_result(
+            result_path,
+            {
+                "stdout": "",
+                "stderr": str(error),
+                "exit_code": 1,
+                "exec_duration_ms": int((time.monotonic() - started) * 1000),
+            },
         )
         return 1
+
+
+def terminal_session(session_dir: Path) -> int:
+    """Own one long-lived Xfce terminal and execute queued MCP requests in it."""
+    session_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ready_path = session_dir / "ready"
+    ready_temporary = session_dir / ".ready.tmp"
+    ready_temporary.write_text(str(os.getpid()), encoding="utf-8")
+    os.replace(ready_temporary, ready_path)
+    sys.stdout.write("\033[1;36mMCP persistent terminal\033[0m\n")
+    sys.stdout.flush()
+    try:
+        while True:
+            # The cross-process control lock permits only one outstanding
+            # request, so filename order is sufficient and avoids a stat race
+            # if a timed-out caller removes its request concurrently.
+            requests = sorted(session_dir.glob("request-*.json"))
+            if not requests:
+                time.sleep(0.05)
+                continue
+            for request_path in requests:
+                try:
+                    terminal_runner(request_path)
+                except FileNotFoundError:
+                    continue
+                except Exception as error:
+                    print(f"Terminal request failed: {error}", file=sys.stderr)
+                finally:
+                    try:
+                        request_path.unlink()
+                    except FileNotFoundError:
+                        pass
+    finally:
+        try:
+            if ready_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                ready_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def terminal_session_pid(session_dir: Path) -> int | None:
+    """Return the live worker PID recorded for the persistent terminal."""
+    try:
+        pid = int((session_dir / "ready").read_text(encoding="utf-8").strip())
+        command_line = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (FileNotFoundError, PermissionError, ValueError):
+        return None
+    if b"--terminal-session" not in command_line:
+        return None
+    return pid
+
+
+def find_terminal_window() -> str | None:
+    matches = run(
+        "xdotool",
+        "search",
+        "--name",
+        f"^{re.escape(TERMINAL_SESSION_TITLE)}$",
+        check=False,
+    ).stdout.splitlines()
+    return matches[-1] if matches else None
+
+
+def ensure_terminal_session(session_dir: Path) -> str:
+    """Start the MCP terminal once, then return the existing X11 window ID."""
+    session_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    process: subprocess.Popen[bytes] | None = None
+    if terminal_session_pid(session_dir) is None:
+        for stale_path in session_dir.iterdir():
+            if stale_path.name == "ready" or stale_path.name.startswith(
+                ("request-", "result-", ".request-", ".result-")
+            ):
+                try:
+                    stale_path.unlink()
+                except FileNotFoundError:
+                    pass
+        process = subprocess.Popen(
+            [
+                "xfce4-terminal",
+                "--disable-server",
+                f"--title={TERMINAL_SESSION_TITLE}",
+                "--working-directory=/workspace",
+                "--execute",
+                "python3",
+                str(Path(__file__).resolve()),
+                "--terminal-session",
+                str(session_dir),
+            ],
+            env=os.environ,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    deadline = time.monotonic() + 12
+    window_id: str | None = None
+    while time.monotonic() < deadline:
+        if terminal_session_pid(session_dir) is not None:
+            window_id = find_terminal_window()
+            if window_id is not None:
+                return window_id
+        if process is not None and process.poll() is not None:
+            raise RuntimeError("The persistent terminal exited before it was ready.")
+        time.sleep(0.05)
+    raise RuntimeError("The persistent terminal window was not found.")
+
+
+def queued_terminal_execute(
+    payload: dict[str, Any],
+    *,
+    session_dir: Path,
+    timeout: int,
+) -> dict[str, Any]:
+    """Submit one request while the cross-process terminal lock is held."""
+    window_id = ensure_terminal_session(session_dir)
+    token = uuid.uuid4().hex
+    payload_path = session_dir / f"request-{token}.json"
+    temporary_payload_path = session_dir / f".request-{token}.tmp"
+    result_path = session_dir / f"result-{token}.json"
+    temporary_payload_path.write_text(
+        json.dumps({**payload, "result_path": str(result_path)}),
+        encoding="utf-8",
+    )
+    os.replace(temporary_payload_path, payload_path)
+    try:
+        run("xdotool", "windowactivate", "--sync", window_id)
+
+        deadline = time.monotonic() + timeout + 5
+        while time.monotonic() < deadline and not result_path.exists():
+            time.sleep(0.05)
+        if not result_path.exists():
+            raise RuntimeError("The visible terminal did not return a result.")
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        result["window_id"] = window_id_text(int(window_id))
+        return result
+    finally:
+        for path in (temporary_payload_path, payload_path, result_path):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def terminal_execute(payload: dict[str, Any]) -> dict[str, Any]:
@@ -553,66 +697,26 @@ def terminal_execute(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Working directory '{working_directory}' does not exist.")
     timeout = max(1, int(payload.get("timeout") or 120))
 
-    token = uuid.uuid4().hex
-    run_dir = Path(tempfile.mkdtemp(prefix=f"mcp-visible-terminal-{token}-"))
-    payload_path = run_dir / "payload.json"
-    result_path = run_dir / "result.json"
-    payload_path.write_text(
-        json.dumps({**payload, "result_path": str(result_path)}),
-        encoding="utf-8",
-    )
-    title = f"MCP Terminal {token[:8]}"
-    process = subprocess.Popen(
-        [
-            "xfce4-terminal",
-            "--disable-server",
-            f"--title={title}",
-            f"--working-directory={working_directory}",
-            "--execute",
-            "python3",
-            str(Path(__file__).resolve()),
-            "--terminal-runner",
-            str(payload_path),
-        ],
-        env=os.environ,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
-        window_id: str | None = None
-        window_deadline = time.monotonic() + 12
-        while time.monotonic() < window_deadline and window_id is None:
-            matches = run(
-                "xdotool", "search", "--name", title, check=False
-            ).stdout.splitlines()
-            if matches:
-                window_id = matches[-1]
-                break
-            if process.poll() is not None and not result_path.exists():
-                raise RuntimeError("The visible terminal exited before it was ready.")
-            time.sleep(0.05)
-        if window_id is None:
-            raise RuntimeError("The visible terminal window was not found.")
-        run("xdotool", "windowactivate", "--sync", window_id)
+    # Multiple MCP server processes can attach to the same persistent Docker
+    # computer. A Linux file lock makes terminal creation and command dispatch
+    # one cross-process critical section, so they still share exactly one window.
+    import fcntl
 
-        deadline = time.monotonic() + timeout + 5
-        while time.monotonic() < deadline and not result_path.exists():
-            time.sleep(0.05)
-        if not result_path.exists():
-            raise RuntimeError("The visible terminal did not return a result.")
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-        result["window_id"] = window_id_text(int(window_id))
-        return result
-    finally:
-        for path in (payload_path, result_path):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+    session_dir = TERMINAL_SESSION_DIR
+    session_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flock = getattr(fcntl, "flock")
+    lock_exclusive = getattr(fcntl, "LOCK_EX")
+    lock_unlock = getattr(fcntl, "LOCK_UN")
+    with (session_dir / "control.lock").open("a+", encoding="utf-8") as lock_file:
+        flock(lock_file.fileno(), lock_exclusive)
         try:
-            run_dir.rmdir()
-        except OSError:
-            pass
+            return queued_terminal_execute(
+                payload,
+                session_dir=session_dir,
+                timeout=timeout,
+            )
+        finally:
+            flock(lock_file.fileno(), lock_unlock)
 
 
 def dispatch(payload: dict[str, Any]) -> dict[str, Any]:
@@ -647,6 +751,8 @@ def main() -> int:
     try:
         if len(sys.argv) == 3 and sys.argv[1] == "--terminal-runner":
             return terminal_runner(Path(sys.argv[2]))
+        if len(sys.argv) == 3 and sys.argv[1] == "--terminal-session":
+            return terminal_session(Path(sys.argv[2]))
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise ValueError("Desktop action payload must be an object.")

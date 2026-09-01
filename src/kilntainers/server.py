@@ -279,6 +279,18 @@ def _result(
     )
 
 
+def _computer_ui_url(config: ServerConfig) -> str:
+    """Return the standalone dashboard URL, or the MCP App URI for stdio."""
+    if config.transport != "http":
+        return DASHBOARD_URI
+    host = config.host
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    elif ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{config.port}/dashboard.html"
+
+
 def _session_from_context(
     ctx: Context[ServerSession, SessionContext] | None,
 ) -> SessionContext | None:
@@ -910,6 +922,7 @@ def create_server(
             "mcp_endpoint": "/mcp",
             "health": "/healthz",
             "computer_id": config.computer_id,
+            "lifecycle_tools_exposed": config.expose_lifecycle_tools,
             "desktop_environment": (
                 live_sandbox.desktop_environment
                 if live_sandbox is not None
@@ -982,23 +995,33 @@ def create_server(
         terminal_execute,
         name="terminal_execute",
         description=description,
-        meta=_computer_ui_meta(),
     )
 
     async def computer_ui(
         ctx: Context[ServerSession, SessionContext] | None = None,
     ) -> CallToolResult:
         """Open the Three.js virtual computer."""
+        computer_url = _computer_ui_url(config)
         session = _session_from_context(ctx)
         if session is None:
-            return _result({"error": "Internal error: no context provided"}, is_error=True)
+            return _result(
+                {
+                    "url": computer_url,
+                    "resource_uri": DASHBOARD_URI,
+                    "error": "Internal error: no context provided",
+                },
+                is_error=True,
+            )
         backend.start_runtime_preparation()
         runtime = backend.runtime_status()
         if runtime.get("runtime_state") != "ready":
             return _result(
                 {
                     "operation": "idle",
+                    "url": computer_url,
+                    "resource_uri": DASHBOARD_URI,
                     "computer_id": config.computer_id,
+                    "lifecycle_tools_exposed": config.expose_lifecycle_tools,
                     "computer_attached": False,
                     "desktop_environment": config.desktop_environment,
                     "network_access": config.network_access,
@@ -1009,11 +1032,29 @@ def create_server(
         try:
             sandbox = await session.get_or_create_sandbox()
         except BackendError as error:
-            return _result({"error": str(error)}, is_error=True)
+            return _result(
+                {
+                    "url": computer_url,
+                    "resource_uri": DASHBOARD_URI,
+                    "error": str(error),
+                },
+                is_error=True,
+            )
+        capabilities_changed = False
+        if desktop_capability_sync is not None:
+            capabilities_changed = desktop_capability_sync(
+                sandbox.desktop_environment
+            )
+        if capabilities_changed and ctx is not None:
+            await ctx.session.send_tool_list_changed()
+            await ctx.session.send_resource_list_changed()
         return _result(
             {
                 "operation": "idle",
+                "url": computer_url,
+                "resource_uri": DASHBOARD_URI,
                 "computer_id": config.computer_id,
+                "lifecycle_tools_exposed": config.expose_lifecycle_tools,
                 "computer_attached": True,
                 "desktop_environment": sandbox.desktop_environment,
                 "network_access": sandbox.network_access,
@@ -1038,6 +1079,7 @@ def create_server(
             {
                 "operation": "idle",
                 "computer_id": config.computer_id,
+                "lifecycle_tools_exposed": config.expose_lifecycle_tools,
                 "computer_attached": sandbox is not None,
                 "desktop_environment": (
                     sandbox.desktop_environment
@@ -1055,15 +1097,8 @@ def create_server(
             }
         )
 
-    mcp.add_tool(
-        runtime_status,
-        name="runtime_status",
-        description="Read genuine lazy container-runtime setup progress.",
-        meta=_app_only_meta(),
-    )
-
     runtime_switch_lock = asyncio.Lock()
-    desktop_capability_sync: Callable[[bool], None] | None = None
+    desktop_capability_sync: Callable[[bool], bool] | None = None
 
     async def set_network_access(
         enabled: Annotated[
@@ -1084,6 +1119,7 @@ def create_server(
                 {
                     "operation": "idle",
                     "computer_id": config.computer_id,
+                    "lifecycle_tools_exposed": config.expose_lifecycle_tools,
                     "desktop_environment": sandbox.desktop_environment,
                     "desktop_url": sandbox.desktop_url,
                     "network_access": sandbox.network_access,
@@ -1120,6 +1156,7 @@ def create_server(
                 {
                     "operation": "idle",
                     "computer_id": config.computer_id,
+                    "lifecycle_tools_exposed": config.expose_lifecycle_tools,
                     "desktop_environment": sandbox.desktop_environment,
                     "desktop_url": sandbox.desktop_url,
                     "network_access": sandbox.network_access,
@@ -1129,18 +1166,25 @@ def create_server(
         except (BackendError, SandboxDiedError) as error:
             return _result({"error": str(error)}, is_error=True)
 
-    mcp.add_tool(
-        set_network_access,
-        name="set_network_access",
-        description="Change the running Docker computer's real network access.",
-        meta=_app_only_meta(),
-    )
-    mcp.add_tool(
-        set_desktop_environment,
-        name="set_desktop_environment",
-        description="Switch the running computer between virtual and Xfce desktops.",
-        meta=_app_only_meta(),
-    )
+    if config.expose_lifecycle_tools:
+        mcp.add_tool(
+            runtime_status,
+            name="runtime_status",
+            description="Read genuine lazy container-runtime setup progress.",
+            meta=_app_only_meta(),
+        )
+        mcp.add_tool(
+            set_network_access,
+            name="set_network_access",
+            description="Change the running Docker computer's real network access.",
+            meta=_app_only_meta(),
+        )
+        mcp.add_tool(
+            set_desktop_environment,
+            name="set_desktop_environment",
+            description="Switch the running computer between virtual and Xfce desktops.",
+            meta=_app_only_meta(),
+        )
 
     async def _sandbox_for_file_tool(
         ctx: Context[ServerSession, SessionContext] | None,
@@ -1424,7 +1468,7 @@ def create_server(
         (write_file, "write_file", "Write a UTF-8 text file and show it being typed and saved on the virtual computer."),
         (edit_file, "edit_file", "Replace exact UTF-8 text and show it being selected, overwritten, and saved."),
     ):
-        mcp.add_tool(tool, name=name, description=tool_description, meta=_computer_ui_meta())
+        mcp.add_tool(tool, name=name, description=tool_description)
 
     # Define desktop capabilities once, then add/remove them when the mug changes
     # the real runtime mode. This keeps tools/list honest in headless mode.
@@ -1700,16 +1744,16 @@ def create_server(
                 "Return the live Xfce screen as PNG pixels and/or an AT-SPI snapshot.",
                 None,
             ),
-            (click, "click", "Click an AT-SPI element reference or screen coordinates.", _computer_ui_meta()),
-            (type_on_screen, "type", "Type into the active Xfce control.", _computer_ui_meta()),
-            (scroll, "scroll", "Scroll the live Xfce desktop.", _computer_ui_meta()),
-            (list_windows, "list_windows", "List live Xfce windows.", _computer_ui_meta()),
-            (switch_window, "switch_window", "Activate and raise an Xfce window.", _computer_ui_meta()),
-            (move_window, "move_window", "Move or resize an Xfce window.", _computer_ui_meta()),
-            (maximize_window, "maximize_window", "Maximize an Xfce window.", _computer_ui_meta()),
-            (restore_window, "restore_window", "Restore an Xfce window.", _computer_ui_meta()),
-            (minimize_window, "minimize_window", "Minimize an Xfce window.", _computer_ui_meta()),
-            (close_window, "close_window", "Close an Xfce window.", _computer_ui_meta()),
+            (click, "click", "Click an AT-SPI element reference or screen coordinates.", None),
+            (type_on_screen, "type", "Type into the active Xfce control.", None),
+            (scroll, "scroll", "Scroll the live Xfce desktop.", None),
+            (list_windows, "list_windows", "List live Xfce windows.", None),
+            (switch_window, "switch_window", "Activate and raise an Xfce window.", None),
+            (move_window, "move_window", "Move or resize an Xfce window.", None),
+            (maximize_window, "maximize_window", "Maximize an Xfce window.", None),
+            (restore_window, "restore_window", "Restore an Xfce window.", None),
+            (minimize_window, "minimize_window", "Minimize an Xfce window.", None),
+            (close_window, "close_window", "Close an Xfce window.", None),
         ]
         for tool, name, tool_description, meta in desktop_tool_specs:
             mcp.add_tool(tool, name=name, description=tool_description, meta=meta)
@@ -1720,10 +1764,10 @@ def create_server(
         }
         desktop_capabilities_enabled = True
 
-        def sync_desktop_capabilities(enabled: bool) -> None:
+        def sync_desktop_capabilities(enabled: bool) -> bool:
             nonlocal desktop_capabilities_enabled
             if desktop_capabilities_enabled == enabled:
-                return
+                return False
             if enabled:
                 for tool, name, tool_description, meta in desktop_tool_specs:
                     mcp.add_tool(
@@ -1740,6 +1784,7 @@ def create_server(
                 for uri in desktop_resource_objects:
                     mcp._resource_manager._resources.pop(uri, None)
             desktop_capabilities_enabled = enabled
+            return True
 
         desktop_capability_sync = sync_desktop_capabilities
         desktop_capability_sync(config.desktop_environment)

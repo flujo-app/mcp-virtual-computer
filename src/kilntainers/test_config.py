@@ -27,6 +27,7 @@ class TestServerConfig:
         assert config.computer_id == "virtual-computer"
         assert config.desktop_environment is False
         assert config.network_access is True
+        assert config.expose_lifecycle_tools is False
         assert config.workspace_directory == "/workspace"
         assert config.session_timeout == 300
 
@@ -43,6 +44,7 @@ class TestServerConfig:
             computer_id="studio-computer",
             desktop_environment=True,
             network_access=False,
+            expose_lifecycle_tools=True,
             session_timeout=600,
         )
         assert config.transport == "http"
@@ -55,6 +57,7 @@ class TestServerConfig:
         assert config.computer_id == "studio-computer"
         assert config.desktop_environment is True
         assert config.network_access is False
+        assert config.expose_lifecycle_tools is True
         assert config.session_timeout == 600
 
     def test_frozen_immutable(self) -> None:

@@ -15,6 +15,7 @@ from kilntainers.config import BackendConfig, ServerConfig
 from kilntainers.errors import BackendError
 from kilntainers.server import (
     SessionContext,
+    _computer_ui_url,
     _create_handler,
     assemble_tool_description,
     create_lifespan,
@@ -22,6 +23,26 @@ from kilntainers.server import (
 )
 
 # --- Test Configuration ---
+
+
+def test_computer_ui_url_uses_app_uri_for_stdio() -> None:
+    assert _computer_ui_url(ServerConfig()) == "ui://virtual-computer/computer.html"
+
+
+def test_computer_ui_url_uses_reachable_http_dashboard() -> None:
+    config = ServerConfig(
+        transport="http",
+        host="0.0.0.0",
+        port=4173,
+    )
+
+    assert _computer_ui_url(config) == "http://127.0.0.1:4173/dashboard.html"
+
+
+def test_computer_ui_url_brackets_ipv6_hosts() -> None:
+    config = ServerConfig(transport="http", host="::1", port=4173)
+
+    assert _computer_ui_url(config) == "http://[::1]:4173/dashboard.html"
 
 
 @pytest.fixture
@@ -799,7 +820,13 @@ def test_create_server_with_extended_description(mock_backend: MockBackend) -> N
 
 def test_public_tool_schemas_have_no_lifecycle_selector(mock_backend: MockBackend) -> None:
     """Computer identity and persistence are startup configuration only."""
-    server = create_server(mock_backend, ServerConfig(computer_id="fixed-computer"))
+    server = create_server(
+        mock_backend,
+        ServerConfig(
+            computer_id="fixed-computer",
+            expose_lifecycle_tools=True,
+        ),
+    )
     tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
 
     assert set(tools) == {

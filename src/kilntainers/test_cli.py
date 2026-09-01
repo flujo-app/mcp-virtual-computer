@@ -170,6 +170,7 @@ def test_parser_invalid_types():
 def test_build_configs_default_args(monkeypatch):
     """Test build_configs with default arguments."""
     monkeypatch.delenv("DESKTOP_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("EXPOSE_LIFECYCLE_TOOLS", raising=False)
     parser = build_parser()
     args = parser.parse_args([])
 
@@ -189,6 +190,7 @@ def test_build_configs_default_args(monkeypatch):
     assert server_config.extended_tool_instruction is None
     assert server_config.computer_id == "test-computer"
     assert server_config.desktop_environment is False
+    assert server_config.expose_lifecycle_tools is False
 
     # Docker config defaults
     assert docker_config.engine == "docker"
@@ -291,6 +293,21 @@ def test_build_configs_disables_desktop_from_environment(monkeypatch, value: str
 def test_build_configs_rejects_invalid_desktop_environment(monkeypatch) -> None:
     monkeypatch.setenv("DESKTOP_ENVIRONMENT", "sometimes")
     with pytest.raises(ValueError, match="DESKTOP_ENVIRONMENT"):
+        build_configs(build_parser().parse_args([]))
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "on"])
+def test_build_configs_exposes_lifecycle_tools(monkeypatch, value: str) -> None:
+    monkeypatch.setenv("EXPOSE_LIFECYCLE_TOOLS", value)
+
+    server_config, _backend_config = build_configs(build_parser().parse_args([]))
+
+    assert server_config.expose_lifecycle_tools is True
+
+
+def test_build_configs_rejects_invalid_lifecycle_tools_flag(monkeypatch) -> None:
+    monkeypatch.setenv("EXPOSE_LIFECYCLE_TOOLS", "sometimes")
+    with pytest.raises(ValueError, match="EXPOSE_LIFECYCLE_TOOLS"):
         build_configs(build_parser().parse_args([]))
 
 

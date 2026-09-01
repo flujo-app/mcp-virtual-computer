@@ -104,6 +104,49 @@ async def test_attach_starts_stopped_permanent_container(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_attach_preserves_live_desktop_and_network_state(monkeypatch) -> None:
+    backend = DockerBackend(
+        DockerBackendConfig(desktop_environment=False, network_enabled=True)
+    )
+    backend._validated = True
+    row = inspect_row()
+
+    async def inspect(_computer_id):
+        return row
+
+    async def ready(self):
+        return None
+
+    async def sync(_sandbox):
+        return None
+
+    async def read_desktop(sandbox):
+        sandbox._desktop_environment = True
+        return True
+
+    async def read_network(sandbox):
+        sandbox._network_access = False
+        return False
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("attach must not reapply startup defaults")
+
+    monkeypatch.setattr(backend, "_inspect_computer", inspect)
+    monkeypatch.setattr(DockerSandbox, "_verify_readiness", ready)
+    monkeypatch.setattr(backend, "_sync_desktop_helpers", sync)
+    monkeypatch.setattr(backend, "_read_desktop_mode", read_desktop)
+    monkeypatch.setattr(backend, "_read_network_access", read_network)
+    monkeypatch.setattr(backend, "_set_desktop_mode", unexpected)
+    monkeypatch.setattr(backend, "_set_network_access_on_sandbox", unexpected)
+
+    sandbox = await backend.attach_sandbox("dev-box")
+
+    assert sandbox is not None
+    assert sandbox.desktop_environment is True
+    assert sandbox.network_access is False
+
+
+@pytest.mark.asyncio
 async def test_delete_uses_force_remove(monkeypatch) -> None:
     backend = DockerBackend(DockerBackendConfig())
     backend._validated = True

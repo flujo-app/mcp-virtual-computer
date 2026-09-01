@@ -160,6 +160,10 @@ def build_configs(
         computer_id=os.getenv("COMPUTER_ID", ""),
         desktop_environment=env_flag("DESKTOP_ENVIRONMENT", default=False),
         network_access=env_flag("NETWORK_ACCESS", default=args.network),
+        expose_lifecycle_tools=env_flag(
+            "EXPOSE_LIFECYCLE_TOOLS",
+            default=False,
+        ),
         tool_instruction_override=args.tool_instruction_override,
         extended_tool_instruction=args.extended_tool_instruction,
         session_timeout=session_timeout,

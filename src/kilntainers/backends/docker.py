@@ -34,8 +34,9 @@ IMAGE_LABEL = "kilntainers.image"
 DESKTOP_LABEL = "mcp-virtual-computer.desktop"
 WORKSPACE_LABEL = "mcp-virtual-computer.workspace"
 DESKTOP_MODE_FILE = "/var/lib/mcp-virtual-computer/desktop-enabled"
+NETWORK_MODE_FILE = "/var/lib/mcp-virtual-computer/network-enabled"
 DESKTOP_IMAGE_VERSION_LABEL = "mcp-virtual-computer.image-version"
-DESKTOP_IMAGE_VERSION = "2"
+DESKTOP_IMAGE_VERSION = "3"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -756,6 +757,71 @@ class DockerBackend(Backend):
             sandbox._desktop_environment = returncode == 0
         return sandbox.desktop_environment
 
+    async def _read_network_access(self, sandbox: "DockerSandbox") -> bool:
+        """Read the live desktop firewall state without reapplying defaults."""
+        if sandbox._desktop_host_port is None:
+            return sandbox.network_access
+        returncode, stdout, _ = await self._run_docker(
+            "exec",
+            sandbox._container_id,
+            "sh",
+            "-c",
+            "if [ -f /run/mcp-network-disabled ]; then "
+            "printf false; else printf true; fi",
+            check=False,
+            timeout=5,
+        )
+        if returncode == 0:
+            sandbox._network_access = (
+                stdout.decode("utf-8", errors="replace").strip().casefold()
+                == "true"
+            )
+            value = str(sandbox.network_access).lower()
+            await self._run_docker(
+                "exec",
+                "-u",
+                "0",
+                sandbox._container_id,
+                "sh",
+                "-c",
+                "install -d -o computer -g computer "
+                f"$(dirname {NETWORK_MODE_FILE}); "
+                f"printf '%s\\n' {value} > {NETWORK_MODE_FILE}; "
+                f"chown computer:computer {NETWORK_MODE_FILE}",
+                timeout=5,
+            )
+        return sandbox.network_access
+
+    async def _sync_desktop_helpers(self, sandbox: "DockerSandbox") -> None:
+        """Upgrade helper scripts in place without restarting the computer."""
+        if (
+            sandbox._desktop_host_port is None
+            or sandbox.image != DEFAULT_DESKTOP_IMAGE
+        ):
+            return
+        context = files("kilntainers").joinpath("desktop_image")
+        for source_name, destination_name in (
+            ("desktop-control.py", "desktop-control"),
+            ("start-desktop.sh", "start-desktop"),
+        ):
+            await self._run_docker(
+                "cp",
+                str(context.joinpath(source_name)),
+                f"{sandbox._container_id}:/usr/local/bin/{destination_name}",
+                timeout=15,
+            )
+        await self._run_docker(
+            "exec",
+            "-u",
+            "0",
+            sandbox._container_id,
+            "chmod",
+            "0755",
+            "/usr/local/bin/desktop-control",
+            "/usr/local/bin/start-desktop",
+            timeout=10,
+        )
+
     @staticmethod
     def _desktop_ready_check() -> str:
         """Shell predicate for a usable Xfce session and its VNC transport."""
@@ -848,16 +914,9 @@ class DockerBackend(Backend):
                 )
         sandbox = self._sandbox_from_inspect(data)
         await sandbox._verify_readiness()
+        await self._sync_desktop_helpers(sandbox)
         await self._read_desktop_mode(sandbox)
-        if sandbox.desktop_environment != self._config.desktop_environment:
-            await self._set_desktop_mode(
-                sandbox,
-                self._config.desktop_environment,
-            )
-        await self._set_network_access_on_sandbox(
-            sandbox,
-            self._config.network_enabled,
-        )
+        await self._read_network_access(sandbox)
         return sandbox
 
     async def list_computers(self) -> list[ComputerInfo]:
@@ -973,7 +1032,9 @@ class DockerBackend(Backend):
                 "iptables -D OUTPUT -j MCP_NO_NETWORK 2>/dev/null || true; "
                 "iptables -F MCP_NO_NETWORK 2>/dev/null || true; "
                 "iptables -X MCP_NO_NETWORK 2>/dev/null || true; "
-                "rm -f /run/mcp-network-disabled"
+                "rm -f /run/mcp-network-disabled; "
+                f"printf 'true\\n' > {NETWORK_MODE_FILE}; "
+                f"chown computer:computer {NETWORK_MODE_FILE}"
             )
         else:
             script = (
@@ -987,7 +1048,9 @@ class DockerBackend(Backend):
                 "iptables -A MCP_NO_NETWORK -j REJECT; "
                 "iptables -C OUTPUT -j MCP_NO_NETWORK 2>/dev/null || "
                 "iptables -I OUTPUT 1 -j MCP_NO_NETWORK; "
-                "touch /run/mcp-network-disabled"
+                "touch /run/mcp-network-disabled; "
+                f"printf 'false\\n' > {NETWORK_MODE_FILE}; "
+                f"chown computer:computer {NETWORK_MODE_FILE}"
             )
         try:
             await self._run_docker(

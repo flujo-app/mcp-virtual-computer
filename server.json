@@ -3,7 +3,7 @@
   "name": "io.github.flujo-app/mcp-virtual-computer",
   "title": "MCP Virtual Computer",
   "description": "A persistent Docker computer rendered as a Three.js laptop, with an optional live Xfce desktop.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "websiteUrl": "https://github.com/flujo-app/mcp-virtual-computer",
   "icons": [
     {
@@ -23,7 +23,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "mcp-virtual-computer",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -66,6 +66,18 @@
           "name": "AUTO_INSTALL_DOCKER",
           "description": "On Windows, install and start Docker Desktop lazily when needed.",
           "default": "true",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "format": "boolean",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "EXPOSE_LIFECYCLE_TOOLS",
+          "description": "Expose runtime status and runtime network/desktop switching tools.",
+          "default": "false",
           "choices": [
             "false",
             "true"

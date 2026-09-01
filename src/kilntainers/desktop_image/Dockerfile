@@ -1,6 +1,6 @@
 FROM debian:bookworm-slim
 
-LABEL mcp-virtual-computer.image-version="2"
+LABEL mcp-virtual-computer.image-version="3"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     DISPLAY=:99 \

@@ -58,6 +58,7 @@ class ServerConfig:
     computer_id: str = "virtual-computer"
     desktop_environment: bool = False
     network_access: bool = True
+    expose_lifecycle_tools: bool = False
 
     # Tool description
     tool_instruction_override: str | None = None

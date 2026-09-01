@@ -23,7 +23,7 @@ With `DESKTOP_ENVIRONMENT=true`, it additionally exposes:
 - `computer://screen/current.png` — current live framebuffer resource.
 - `computer://screen/accessibility.json` — Playwright-like AT-SPI tree with element refs, roles, names, actions, focus state, and screen bounds.
 
-The computer ID is server configuration, not a tool argument. Lifecycle tools and temporary-computer arguments are not exposed.
+The computer ID is server configuration, not a tool argument. Temporary-computer arguments are not exposed. Set `EXPOSE_LIFECYCLE_TOOLS=true` to additionally expose `runtime_status`, `set_network_access`, and `set_desktop_environment`; they are absent by default.
 
 ## Required configuration
 
@@ -32,9 +32,10 @@ COMPUTER_ID=agent-workstation
 DESKTOP_ENVIRONMENT=false
 NETWORK_ACCESS=true
 AUTO_INSTALL_DOCKER=true
+EXPOSE_LIFECYCLE_TOOLS=false
 ```
 
-`COMPUTER_ID` is required and selects the one persistent Docker computer. `DESKTOP_ENVIRONMENT` accepts `true`, `false`, `1`, `0`, `yes`, `no`, `on`, or `off`, and defaults to `false`. `NETWORK_ACCESS` accepts the same values and defaults to `true`. On Windows, `AUTO_INSTALL_DOCKER` accepts the same values and defaults to `true`.
+`COMPUTER_ID` is required and selects the one persistent Docker computer. `DESKTOP_ENVIRONMENT` accepts `true`, `false`, `1`, `0`, `yes`, `no`, `on`, or `off`, and defaults to `false`. `NETWORK_ACCESS` accepts the same values and defaults to `true`. On Windows, `AUTO_INSTALL_DOCKER` accepts the same values and defaults to `true`. `EXPOSE_LIFECYCLE_TOOLS` accepts the same boolean values and defaults to `false`.
 
 ### Lazy Docker setup on Windows
 
@@ -44,7 +45,7 @@ The Three.js screen shows the observed setup phase. While WinGet downloads Docke
 
 Set `AUTO_INSTALL_DOCKER=false` to require a preinstalled runtime. `DOCKER_INSTALL_TIMEOUT` defaults to 1200 seconds and `DOCKER_START_TIMEOUT` defaults to 240 seconds. A fresh PC can still require one elevated `wsl --install`/`wsl --update`, a Windows restart, or BIOS/UEFI virtualization; the App reports that condition instead of looping or claiming success.
 
-These environment values are startup defaults. New default computers always use the bundled desktop-capable image, even when Xfce starts off. In the Three.js scene, click the LAN cable to really enable or disable the running container's outbound network; the container keeps its loopback-published noVNC transport and applies an outbound firewall inside its network namespace. Click the two-sided mug (`I <3 virtual desktops` / `I <3 real desktops`) to stop or start Xfce inside that same container. The container ID and its entire writable filesystem—not only `/workspace`—stay intact.
+These environment values are creation defaults. Reattaching from another MCP process discovers and preserves the existing container's live desktop and network state instead of reapplying those defaults. New default computers always use the bundled desktop-capable image, even when Xfce starts off. With `EXPOSE_LIFECYCLE_TOOLS=true`, click the LAN cable to really enable or disable the running container's outbound network; the container keeps its loopback-published noVNC transport and applies an outbound firewall inside its network namespace. Click the two-sided mug (`I <3 virtual desktops` / `I <3 real desktops`) to stop or start Xfce inside that same container. The container ID and its entire writable filesystem—not only `/workspace`—stay intact.
 
 ## The two screen modes
 
@@ -54,7 +55,7 @@ The Three.js laptop has a labeled QWERTY keyboard whose physical keys follow gen
 
 The display is also directly controllable. Pointer input is raycast onto the angled 3D screen: double-click Files or Workspace, navigate real Docker folders, open text files, edit with the physical keyboard, and press Ctrl+S to save through `write_file`. Right-click inside Files to create a new text file; it opens unsaved in the editor until Ctrl+S is pressed. The red title-bar control closes the active virtual window. The virtual terminal executes typed commands on Enter. With the real desktop enabled, the same pointer and keyboard input is forwarded to the live VNC session. Filesystem and terminal interaction requires the App to be opened through an MCP host; the standalone static preview never invents directory contents.
 
-With `DESKTOP_ENVIRONMENT=true`, the server builds the bundled Debian Bookworm/Xfce image on first use. The laptop then displays that container's real X11 framebuffer through noVNC. File tools drive real Thunar and Mousepad input through AT-SPI/Dogtail, `xdotool`, and `wmctrl`; the file operation itself remains deterministic and completes before the MCP result is returned. `terminal_execute` runs exactly once in a visible Xfce terminal, streams the same stdout and stderr to that window, and returns the captured exit status and output through MCP.
+With `DESKTOP_ENVIRONMENT=true`, the server builds the bundled Debian Bookworm/Xfce image on first use. The laptop then displays that container's real X11 framebuffer through noVNC. File tools drive real Thunar and Mousepad input through AT-SPI/Dogtail, `xdotool`, and `wmctrl`; the file operation itself remains deterministic and completes before the MCP result is returned. `terminal_execute` runs exactly once per call in one persistent MCP Terminal window, streams the same stdout and stderr to that window, and returns the captured exit status and output through MCP. Command processes remain independent, but repeated calls no longer spawn additional terminal windows.
 
 Sound from Xfce applications is routed through a 48 kHz stereo PulseAudio sink and streamed from the same loopback-only desktop endpoint into the dashboard. Browsers require a user gesture before playing audio, so click anywhere in the Three.js scene once after loading or refreshing it. Audio is sourced only from the real desktop; virtual mode does not synthesize sound.
 
@@ -114,7 +115,8 @@ The Compose controller mounts `/var/run/docker.sock` so it can create and reatta
         "COMPUTER_ID": "agent-workstation",
         "DESKTOP_ENVIRONMENT": "false",
         "NETWORK_ACCESS": "true",
-        "AUTO_INSTALL_DOCKER": "true"
+        "AUTO_INSTALL_DOCKER": "true",
+        "EXPOSE_LIFECYCLE_TOOLS": "false"
       }
     }
   }

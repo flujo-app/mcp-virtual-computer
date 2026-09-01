@@ -11,6 +11,8 @@ type Operation = "idle" | "terminal_execute" | "read_file" | "write_file" | "edi
 
 interface ComputerPayload {
   operation?: Operation;
+  url?: string;
+  resource_uri?: string;
   computer_id?: string;
   desktop_environment?: boolean;
   desktop_url?: string | null;
@@ -36,6 +38,7 @@ interface ComputerPayload {
   downloaded_bytes?: number | null;
   download_total_bytes?: number | null;
   runtime_error?: string | null;
+  lifecycle_tools_exposed?: boolean;
 }
 
 interface ActivityEvent {
@@ -81,6 +84,7 @@ interface VirtualState {
   downloadedBytes?: number;
   downloadTotalBytes?: number;
   runtimeError?: string;
+  lifecycleToolsExposed: boolean;
 }
 
 interface KeyDefinition {
@@ -152,6 +156,7 @@ const state: VirtualState = {
   runtimeMessage: "Docker is ready.",
   runtimeProgress: 4,
   runtimeTotal: 4,
+  lifecycleToolsExposed: false,
 };
 
 const manual: ManualState = {
@@ -1468,6 +1473,9 @@ function applyPayload(payload: ComputerPayload) {
   state.downloadedBytes = payload.downloaded_bytes ?? undefined;
   state.downloadTotalBytes = payload.download_total_bytes ?? undefined;
   state.runtimeError = payload.runtime_error ?? undefined;
+  if (payload.lifecycle_tools_exposed !== undefined) {
+    state.lifecycleToolsExposed = payload.lifecycle_tools_exposed;
+  }
   if (payload.operation && payload.operation !== "idle") {
     state.operation = payload.operation;
     state.payload = payload;
@@ -1506,18 +1514,11 @@ async function pollRuntimeStatus() {
   runtimePollInFlight = true;
   try {
     const result = directClient
-      ? await directClient.callTool({ name: "runtime_status", arguments: {} })
-      : await app.callServerTool({ name: "runtime_status", arguments: {} });
+      ? await directClient.callTool({ name: "computer_ui", arguments: {} })
+      : await app.callServerTool({ name: "computer_ui", arguments: {} });
     const payload = payloadOf(result);
     if (!payload) return;
     applyPayload(payload);
-    if (payload.runtime_state === "ready" && !payload.computer_attached) {
-      const attachResult = directClient
-        ? await directClient.callTool({ name: "computer_ui", arguments: {} })
-        : await app.callServerTool({ name: "computer_ui", arguments: {} });
-      const attached = payloadOf(attachResult);
-      if (attached) applyPayload(attached);
-    }
   } catch {
     // A cancelled host request does not cancel the shielded server setup task.
   } finally {
@@ -1532,6 +1533,7 @@ function startRuntimePolling() {
 }
 
 async function toggleNetworkCable() {
+  if (!state.lifecycleToolsExposed) return;
   if (runtimeSwitchInFlight) return;
   runtimeSwitchInFlight = true;
   try {
@@ -1548,6 +1550,7 @@ async function toggleNetworkCable() {
 }
 
 async function toggleDesktopMug() {
+  if (!state.lifecycleToolsExposed) return;
   if (runtimeSwitchInFlight) return;
   runtimeSwitchInFlight = true;
   try {

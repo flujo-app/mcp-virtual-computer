@@ -3,6 +3,7 @@ set -eu
 
 desktop_state_dir=/var/lib/mcp-virtual-computer
 desktop_state_file=$desktop_state_dir/desktop-enabled
+network_state_file=$desktop_state_dir/network-enabled
 
 if [ "$(id -u)" = "0" ]; then
   install -d -o computer -g computer "$desktop_state_dir"
@@ -21,7 +22,14 @@ if [ "$(id -u)" = "0" ]; then
     esac
     chown computer:computer "$desktop_state_file"
   fi
-  if [ "${NETWORK_ACCESS:-true}" = "false" ]; then
+  if [ ! -f "$network_state_file" ]; then
+    case "${NETWORK_ACCESS:-true}" in
+      true|false) printf '%s\n' "${NETWORK_ACCESS:-true}" > "$network_state_file" ;;
+      *) echo "NETWORK_ACCESS must be true or false" >&2; exit 2 ;;
+    esac
+    chown computer:computer "$network_state_file"
+  fi
+  if [ "$(cat "$network_state_file")" = "false" ]; then
     iptables -N MCP_NO_NETWORK 2>/dev/null || true
     iptables -F MCP_NO_NETWORK
     iptables -A MCP_NO_NETWORK -o lo -j ACCEPT
@@ -29,6 +37,8 @@ if [ "$(id -u)" = "0" ]; then
     iptables -A MCP_NO_NETWORK -j REJECT
     iptables -C OUTPUT -j MCP_NO_NETWORK 2>/dev/null || iptables -I OUTPUT 1 -j MCP_NO_NETWORK
     touch /run/mcp-network-disabled
+  else
+    rm -f /run/mcp-network-disabled
   fi
   exec runuser -u computer -- env \
     HOME=/home/computer \
@@ -42,7 +52,7 @@ if [ "$(id -u)" = "0" ]; then
     XDG_DATA_HOME=/home/computer/.local/share \
     XDG_RUNTIME_DIR=/run/user/1000 \
     PULSE_SERVER=unix:/run/user/1000/pulse/native \
-    NETWORK_ACCESS="${NETWORK_ACCESS:-true}" \
+    NETWORK_ACCESS="$(cat "$network_state_file")" \
     DESKTOP_ENVIRONMENT="${DESKTOP_ENVIRONMENT:-true}" \
     /usr/local/bin/start-desktop
 fi

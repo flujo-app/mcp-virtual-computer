@@ -24,9 +24,6 @@ def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
         "read_file",
         "write_file",
         "edit_file",
-        "set_network_access",
-        "set_desktop_environment",
-        "runtime_status",
     }
     assert tools["computer_ui"].meta == {
         "ui": {
@@ -35,10 +32,12 @@ def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
         },
         "openai/outputTemplate": DASHBOARD_URI,
     }
+    for name, tool in tools.items():
+        if name == "computer_ui":
+            continue
+        assert tool.meta is None or "openai/outputTemplate" not in tool.meta
+        assert not (tool.meta or {}).get("ui", {}).get("resourceUri")
     assert tools["list_directory"].meta == {"ui": {"visibility": ["app"]}}
-    assert tools["set_network_access"].meta == {"ui": {"visibility": ["app"]}}
-    assert tools["set_desktop_environment"].meta == {"ui": {"visibility": ["app"]}}
-    assert tools["runtime_status"].meta == {"ui": {"visibility": ["app"]}}
     assert len(resources) == 1
     assert str(resources[0].uri) == DASHBOARD_URI
     assert resources[0].mime_type == DASHBOARD_MIME_TYPE
@@ -79,6 +78,41 @@ def test_lifecycle_management_tools_are_not_exposed() -> None:
     assert payload["extensions"] == {
         "io.modelcontextprotocol/ui": {"mimeTypes": [DASHBOARD_MIME_TYPE]}
     }
+
+
+def test_lifecycle_tools_are_exposed_only_when_enabled() -> None:
+    server = create_server(
+        MockBackend(BackendConfig()),
+        ServerConfig(expose_lifecycle_tools=True),
+    )
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+
+    assert {"runtime_status", "set_network_access", "set_desktop_environment"} <= set(
+        tools
+    )
+    assert tools["set_network_access"].meta == {"ui": {"visibility": ["app"]}}
+    assert tools["set_desktop_environment"].meta == {"ui": {"visibility": ["app"]}}
+    assert tools["runtime_status"].meta == {"ui": {"visibility": ["app"]}}
+
+
+def test_only_computer_ui_exposes_the_mcp_app_in_desktop_mode() -> None:
+    server = create_server(
+        MockBackend(BackendConfig()),
+        ServerConfig(
+            desktop_environment=True,
+            expose_lifecycle_tools=True,
+        ),
+    )
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+
+    app_tools = {
+        name
+        for name, tool in tools.items()
+        if (tool.meta or {}).get("openai/outputTemplate") == DASHBOARD_URI
+        or (tool.meta or {}).get("ui", {}).get("resourceUri") == DASHBOARD_URI
+    }
+
+    assert app_tools == {"computer_ui"}
 
 
 async def _ok(request):

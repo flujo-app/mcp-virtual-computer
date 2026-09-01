@@ -201,8 +201,24 @@ async def test_real_xfce_desktop_replays_and_preserves_file_write() -> None:
         )
         assert terminal.stdout == "visible terminal e2e\n"
         assert terminal.exit_code == 0
+        second_terminal = await visible_terminal_execute(
+            sandbox,
+            command="printf 'same terminal e2e\\n'",
+            args=None,
+            stdin=None,
+            working_directory="/workspace",
+            timeout=30,
+            output_limit=131_072,
+        )
+        assert second_terminal.stdout == "same terminal e2e\n"
+        assert second_terminal.exit_code == 0
         windows = await desktop_action(sandbox, "list_windows")
-        assert any("MCP Terminal" in window["title"] for window in windows["windows"])
+        mcp_terminals = [
+            window
+            for window in windows["windows"]
+            if "MCP Terminal" in window["title"]
+        ]
+        assert len(mcp_terminals) == 1
         saved = await write_text_file(
             sandbox,
             "desktop-e2e.txt",

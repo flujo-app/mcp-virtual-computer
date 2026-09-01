@@ -132,6 +132,7 @@ function verifyMetadata() {
     DESKTOP_ENVIRONMENT: "false",
     NETWORK_ACCESS: "true",
     AUTO_INSTALL_DOCKER: "true",
+    EXPOSE_LIFECYCLE_TOOLS: "false",
   };
   if (server.version !== version) {
     problems.push(`server.json version does not match package.json ${version}`);
