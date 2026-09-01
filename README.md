@@ -32,6 +32,10 @@ A VM for your agent. And for you.
   }
 }
 ```
+# Demo: FLUJO
+<img width="1804" height="996" alt="image" src="https://github.com/user-attachments/assets/b4b53c25-1520-4a23-9a10-03b4f4132cd5" />
+
+# Demo: Claude Desktop
 <img width="807" height="787" alt="image" src="https://github.com/user-attachments/assets/1a8fe86f-fab4-49aa-8740-2e06044344af" />
 
 ## What it exposes
