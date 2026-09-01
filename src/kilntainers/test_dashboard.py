@@ -8,7 +8,11 @@ from starlette.testclient import TestClient
 from kilntainers.auth import BearerTokenMiddleware
 from kilntainers.backends.test_utils import MockBackend
 from kilntainers.config import BackendConfig, ServerConfig
-from kilntainers.dashboard import DASHBOARD_MIME_TYPE, DASHBOARD_URI
+from kilntainers.dashboard import (
+    DASHBOARD_MIME_TYPE,
+    DASHBOARD_RESOURCE_META,
+    DASHBOARD_URI,
+)
 from kilntainers.server import create_server
 
 
@@ -24,6 +28,9 @@ def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
         "read_file",
         "write_file",
         "edit_file",
+        "runtime_status",
+        "set_network_access",
+        "set_desktop_environment",
     }
     assert tools["computer_ui"].meta == {
         "ui": {
@@ -31,6 +38,7 @@ def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
             "resourceUri": DASHBOARD_URI,
         },
         "openai/outputTemplate": DASHBOARD_URI,
+        "openai/widgetAccessible": True,
     }
     for name, tool in tools.items():
         if name == "computer_ui":
@@ -38,6 +46,8 @@ def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
         assert tool.meta is None or "openai/outputTemplate" not in tool.meta
         assert not (tool.meta or {}).get("ui", {}).get("resourceUri")
     assert tools["list_directory"].meta == {"ui": {"visibility": ["app"]}}
+    for name in ("runtime_status", "set_network_access", "set_desktop_environment"):
+        assert tools[name].meta == {"ui": {"visibility": ["app"]}}
     assert len(resources) == 1
     assert str(resources[0].uri) == DASHBOARD_URI
     assert resources[0].mime_type == DASHBOARD_MIME_TYPE
@@ -47,6 +57,13 @@ def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
     assert payload["extensions"] == {
         "io.modelcontextprotocol/ui": {"mimeTypes": [DASHBOARD_MIME_TYPE]}
     }
+    assert DASHBOARD_RESOURCE_META["ui"]["permissions"] == {
+        "clipboardWrite": {}
+    }
+    assert DASHBOARD_RESOURCE_META["openai/widgetCSP"]["connect_domains"] == [
+        "ws://127.0.0.1:*",
+        "http://127.0.0.1:*",
+    ]
 
 
 async def test_virtual_computer_html_is_self_contained() -> None:
@@ -61,26 +78,33 @@ async def test_virtual_computer_html_is_self_contained() -> None:
     assert "No operations will be simulated" not in html
     assert 'pathname="/audio"' in html
     assert "AudioContext" in html
+    assert "clipboardPasteFrom" in html
+    assert 'addEventListener("clipboard"' in html
+    assert "navigator.clipboard.readText" in html
+    assert "navigator.clipboard.writeText" in html
+    assert '"runtime_status"' in html
+    assert 'window.parent!==window' in html
     assert "<script src=" not in html
     assert "<link rel=" not in html
 
 
-def test_lifecycle_management_tools_are_not_exposed() -> None:
+def test_lifecycle_management_tools_are_app_only_by_default() -> None:
     server = create_server(MockBackend(BackendConfig()), ServerConfig())
 
-    tools = {tool.name for tool in server._tool_manager.list_tools()}
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
     resources = server._resource_manager.list_resources()
     capabilities = server._mcp_server.create_initialization_options().capabilities
     payload = capabilities.model_dump(by_alias=True, exclude_none=True)
 
-    assert not any(name.startswith("computer_") and name != "computer_ui" for name in tools)
+    for name in ("runtime_status", "set_network_access", "set_desktop_environment"):
+        assert tools[name].meta == {"ui": {"visibility": ["app"]}}
     assert len(resources) == 1
     assert payload["extensions"] == {
         "io.modelcontextprotocol/ui": {"mimeTypes": [DASHBOARD_MIME_TYPE]}
     }
 
 
-def test_lifecycle_tools_are_exposed_only_when_enabled() -> None:
+def test_lifecycle_tools_add_model_visibility_when_enabled() -> None:
     server = create_server(
         MockBackend(BackendConfig()),
         ServerConfig(expose_lifecycle_tools=True),
@@ -90,9 +114,10 @@ def test_lifecycle_tools_are_exposed_only_when_enabled() -> None:
     assert {"runtime_status", "set_network_access", "set_desktop_environment"} <= set(
         tools
     )
-    assert tools["set_network_access"].meta == {"ui": {"visibility": ["app"]}}
-    assert tools["set_desktop_environment"].meta == {"ui": {"visibility": ["app"]}}
-    assert tools["runtime_status"].meta == {"ui": {"visibility": ["app"]}}
+    expected = {"ui": {"visibility": ["model", "app"]}}
+    assert tools["set_network_access"].meta == expected
+    assert tools["set_desktop_environment"].meta == expected
+    assert tools["runtime_status"].meta == expected
 
 
 def test_only_computer_ui_exposes_the_mcp_app_in_desktop_mode() -> None:

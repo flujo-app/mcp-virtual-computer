@@ -94,6 +94,35 @@ async def test_session_reuses_only_configured_persistent_computer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_registry_refreshes_provider_owned_state() -> None:
+    class RefreshingBackend(MockBackend):
+        def __init__(self) -> None:
+            super().__init__(BackendConfig())
+            self.replacement = MockSandbox(sandbox_id="refreshed")
+            self.refresh_count = 0
+
+        async def refresh_sandbox(self, computer_id, sandbox):
+            assert computer_id == "shared"
+            self.refresh_count += 1
+            return self.replacement
+
+    backend = RefreshingBackend()
+    registry = ComputerRegistry(backend)
+    _, original = await registry.acquire(
+        "shared",
+        temporary=False,
+        add_owner=True,
+    )
+
+    refreshed = await registry.refresh("shared")
+
+    assert refreshed is backend.replacement
+    assert refreshed is not original
+    assert await registry.get_owned("shared") is refreshed
+    assert backend.refresh_count == 1
+
+
+@pytest.mark.asyncio
 async def test_existing_lifecycle_mode_cannot_be_silently_changed() -> None:
     backend = MockBackend(BackendConfig())
     registry = ComputerRegistry(backend)

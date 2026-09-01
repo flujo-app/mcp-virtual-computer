@@ -76,7 +76,7 @@
         },
         {
           "name": "EXPOSE_LIFECYCLE_TOOLS",
-          "description": "Expose runtime status and runtime network/desktop switching tools.",
+          "description": "Also expose runtime status and network/desktop switching tools to the model. The MCP App can always use them.",
           "default": "false",
           "choices": [
             "false",

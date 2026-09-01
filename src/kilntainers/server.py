@@ -166,6 +166,21 @@ class SessionContext:
             self._start_death_monitor(assigned_id, sandbox)
             return sandbox
 
+    async def refresh_sandbox(self, computer_id: str | None = None) -> Sandbox:
+        """Refresh provider-owned state that another MCP process may change."""
+        target_id = computer_id or self._current_computer_id
+        if target_id is None:
+            return await self.get_or_create_sandbox()
+        previous = self._registry.peek(target_id)
+        sandbox = await self._registry.refresh(target_id)
+        if sandbox is None:
+            return await self.get_or_create_sandbox(target_id)
+        if previous is not sandbox and target_id in self._owned_computers:
+            await self._cancel_death_monitor(target_id)
+            self._start_death_monitor(target_id, sandbox)
+        self._current_computer_id = target_id
+        return sandbox
+
     def _start_death_monitor(self, computer_id: str, sandbox: Sandbox) -> None:
         """Start monitoring sandbox for unexpected death."""
 
@@ -277,6 +292,14 @@ def _result(
         isError=is_error,
         structuredContent=payload,
     )
+
+
+def _lifecycle_payload(config: ServerConfig) -> dict[str, bool]:
+    """Describe App control availability separately from model visibility."""
+    return {
+        "lifecycle_tools_exposed": True,
+        "lifecycle_tools_model_visible": config.expose_lifecycle_tools,
+    }
 
 
 def _computer_ui_url(config: ServerConfig) -> str:
@@ -594,12 +617,22 @@ def _computer_ui_meta(*, launcher: bool = False) -> dict[str, Any]:
             "resourceUri": DASHBOARD_URI,
         },
         "openai/outputTemplate": DASHBOARD_URI,
+        "openai/widgetAccessible": True,
     }
 
 
 def _app_only_meta() -> dict[str, Any]:
     """Hide manual UI plumbing from the model while exposing it to the App."""
     return {"ui": {"visibility": ["app"]}}
+
+
+def _lifecycle_meta(*, model_visible: bool) -> dict[str, Any]:
+    """Lifecycle controls always belong to the App and optionally the model."""
+    return {
+        "ui": {
+            "visibility": ["model", "app"] if model_visible else ["app"],
+        }
+    }
 
 
 def _register_computer_tools(mcp: FastMCP, config: ServerConfig) -> None:
@@ -922,7 +955,7 @@ def create_server(
             "mcp_endpoint": "/mcp",
             "health": "/healthz",
             "computer_id": config.computer_id,
-            "lifecycle_tools_exposed": config.expose_lifecycle_tools,
+            **_lifecycle_payload(config),
             "desktop_environment": (
                 live_sandbox.desktop_environment
                 if live_sandbox is not None
@@ -1021,7 +1054,7 @@ def create_server(
                     "url": computer_url,
                     "resource_uri": DASHBOARD_URI,
                     "computer_id": config.computer_id,
-                    "lifecycle_tools_exposed": config.expose_lifecycle_tools,
+                    **_lifecycle_payload(config),
                     "computer_attached": False,
                     "desktop_environment": config.desktop_environment,
                     "network_access": config.network_access,
@@ -1030,8 +1063,9 @@ def create_server(
                 }
             )
         try:
-            sandbox = await session.get_or_create_sandbox()
-        except BackendError as error:
+            await session.get_or_create_sandbox()
+            sandbox = await session.refresh_sandbox(config.computer_id)
+        except (BackendError, SandboxDiedError) as error:
             return _result(
                 {
                     "url": computer_url,
@@ -1054,7 +1088,7 @@ def create_server(
                 "url": computer_url,
                 "resource_uri": DASHBOARD_URI,
                 "computer_id": config.computer_id,
-                "lifecycle_tools_exposed": config.expose_lifecycle_tools,
+                **_lifecycle_payload(config),
                 "computer_attached": True,
                 "desktop_environment": sandbox.desktop_environment,
                 "network_access": sandbox.network_access,
@@ -1072,14 +1106,49 @@ def create_server(
         meta=_computer_ui_meta(launcher=True),
     )
 
-    async def runtime_status() -> CallToolResult:
+    async def runtime_status(
+        ctx: Context[ServerSession, SessionContext] | None = None,
+    ) -> CallToolResult:
         """Return lazy host-runtime setup state for the computer App."""
+        session = _session_from_context(ctx)
+        backend.start_runtime_preparation()
+        runtime = backend.runtime_status()
         sandbox = registry.peek(config.computer_id)
+        if session is not None and runtime.get("runtime_state") == "ready":
+            try:
+                if sandbox is None:
+                    sandbox = await session.get_or_create_sandbox(config.computer_id)
+                else:
+                    sandbox = await session.refresh_sandbox(config.computer_id)
+            except (BackendError, SandboxDiedError) as error:
+                return _result(
+                    {
+                        "operation": "idle",
+                        "computer_id": config.computer_id,
+                        **_lifecycle_payload(config),
+                        "computer_attached": False,
+                        "desktop_environment": config.desktop_environment,
+                        "network_access": config.network_access,
+                        "desktop_url": None,
+                        "workspace_directory": config.workspace_directory,
+                        **runtime,
+                        "error": str(error),
+                    },
+                    is_error=True,
+                )
+        capabilities_changed = False
+        if sandbox is not None and desktop_capability_sync is not None:
+            capabilities_changed = desktop_capability_sync(
+                sandbox.desktop_environment
+            )
+        if capabilities_changed and ctx is not None:
+            await ctx.session.send_tool_list_changed()
+            await ctx.session.send_resource_list_changed()
         return _result(
             {
                 "operation": "idle",
                 "computer_id": config.computer_id,
-                "lifecycle_tools_exposed": config.expose_lifecycle_tools,
+                **_lifecycle_payload(config),
                 "computer_attached": sandbox is not None,
                 "desktop_environment": (
                     sandbox.desktop_environment
@@ -1093,7 +1162,7 @@ def create_server(
                 ),
                 "desktop_url": sandbox.desktop_url if sandbox is not None else None,
                 "workspace_directory": config.workspace_directory,
-                **backend.runtime_status(),
+                **runtime,
             }
         )
 
@@ -1119,7 +1188,7 @@ def create_server(
                 {
                     "operation": "idle",
                     "computer_id": config.computer_id,
-                    "lifecycle_tools_exposed": config.expose_lifecycle_tools,
+                    **_lifecycle_payload(config),
                     "desktop_environment": sandbox.desktop_environment,
                     "desktop_url": sandbox.desktop_url,
                     "network_access": sandbox.network_access,
@@ -1156,7 +1225,7 @@ def create_server(
                 {
                     "operation": "idle",
                     "computer_id": config.computer_id,
-                    "lifecycle_tools_exposed": config.expose_lifecycle_tools,
+                    **_lifecycle_payload(config),
                     "desktop_environment": sandbox.desktop_environment,
                     "desktop_url": sandbox.desktop_url,
                     "network_access": sandbox.network_access,
@@ -1166,25 +1235,25 @@ def create_server(
         except (BackendError, SandboxDiedError) as error:
             return _result({"error": str(error)}, is_error=True)
 
-    if config.expose_lifecycle_tools:
-        mcp.add_tool(
-            runtime_status,
-            name="runtime_status",
-            description="Read genuine lazy container-runtime setup progress.",
-            meta=_app_only_meta(),
-        )
-        mcp.add_tool(
-            set_network_access,
-            name="set_network_access",
-            description="Change the running Docker computer's real network access.",
-            meta=_app_only_meta(),
-        )
-        mcp.add_tool(
-            set_desktop_environment,
-            name="set_desktop_environment",
-            description="Switch the running computer between virtual and Xfce desktops.",
-            meta=_app_only_meta(),
-        )
+    lifecycle_meta = _lifecycle_meta(model_visible=config.expose_lifecycle_tools)
+    mcp.add_tool(
+        runtime_status,
+        name="runtime_status",
+        description="Read genuine lazy container-runtime setup progress.",
+        meta=lifecycle_meta,
+    )
+    mcp.add_tool(
+        set_network_access,
+        name="set_network_access",
+        description="Change the running Docker computer's real network access.",
+        meta=lifecycle_meta,
+    )
+    mcp.add_tool(
+        set_desktop_environment,
+        name="set_desktop_environment",
+        description="Switch the running computer between virtual and Xfce desktops.",
+        meta=lifecycle_meta,
+    )
 
     async def _sandbox_for_file_tool(
         ctx: Context[ServerSession, SessionContext] | None,

@@ -147,6 +147,31 @@ async def test_attach_preserves_live_desktop_and_network_state(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_refresh_reads_shared_modes_with_one_docker_exec(monkeypatch) -> None:
+    backend = DockerBackend(DockerBackendConfig())
+    row = inspect_row()
+    network = row.setdefault("NetworkSettings", {})
+    assert isinstance(network, dict)
+    network["Ports"] = {"6080/tcp": [{"HostPort": "49152"}]}
+    sandbox = backend._sandbox_from_inspect(row)
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run(*args, **kwargs):
+        calls.append(args)
+        return 0, b"true\nfalse\n", b""
+
+    monkeypatch.setattr(backend, "_run_docker", fake_run)
+
+    refreshed = await backend.refresh_sandbox("dev-box", sandbox)
+
+    assert refreshed is sandbox
+    assert refreshed.desktop_environment is True
+    assert refreshed.network_access is False
+    assert len(calls) == 1
+    assert calls[0][:3] == ("exec", "a" * 64, "sh")
+
+
+@pytest.mark.asyncio
 async def test_delete_uses_force_remove(monkeypatch) -> None:
     backend = DockerBackend(DockerBackendConfig())
     backend._validated = True

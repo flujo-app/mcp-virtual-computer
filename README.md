@@ -8,6 +8,7 @@ A VM for your agent. And for you.
 - click the mug to switch between a virtual desktop or a real one
 - unplug the network cable and cut network access
 - use the computer screen like a normal screen
+- copy and paste text between the host browser and the Xfce desktop
 - model can use terminal, create/read/edit files, see the screen, click, type
 - little fun thing: if either you or the llm types text, you see that on the keyboard; if one uses the cursor, you see the mouse move on the table.
 - auto installs docker and all prerequresits (hopefully)
@@ -49,7 +50,7 @@ With `DESKTOP_ENVIRONMENT=true`, it additionally exposes:
 - `computer://screen/current.png` — current live framebuffer resource.
 - `computer://screen/accessibility.json` — Playwright-like AT-SPI tree with element refs, roles, names, actions, focus state, and screen bounds.
 
-Set `EXPOSE_LIFECYCLE_TOOLS=true` to additionally expose `runtime_status`, `set_network_access`, and `set_desktop_environment`; these lifecycle tools are absent by default.
+The MCP App can always call `runtime_status`, `set_network_access`, and `set_desktop_environment`. Set `EXPOSE_LIFECYCLE_TOOLS=true` to additionally expose those lifecycle controls to the model; they remain model-hidden by default.
   
 ## License and origin
 

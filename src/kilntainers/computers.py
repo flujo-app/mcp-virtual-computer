@@ -1,9 +1,15 @@
 """Named computer registry shared by MCP sessions and dashboard tools."""
 
 import asyncio
+import os
 import re
 import secrets
+import tempfile
+import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
+from typing import AsyncIterator, BinaryIO
 
 from kilntainers.backends.base import Backend, ComputerInfo, Sandbox
 from kilntainers.errors import BackendError
@@ -37,6 +43,74 @@ _NOUNS = (
     "whale",
     "wolf",
 )
+
+
+class _ProcessFileLock:
+    """Small cross-platform advisory lock shared by local MCP processes."""
+
+    def __init__(self, computer_id: str, timeout: float = 120.0) -> None:
+        self.computer_id = computer_id
+        self.path = Path(tempfile.gettempdir()) / (
+            f"mcp-virtual-computer-{computer_id}.lock"
+        )
+        self.timeout = timeout
+        self.handle: BinaryIO | None = None
+
+    def acquire(self) -> None:
+        handle = self.path.open("a+b")
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:  # pragma: no cover - exercised by Linux CI
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.handle = handle
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    raise BackendError(
+                        f"Timed out waiting to update computer '{self.computer_id}'."
+                    )
+                time.sleep(0.05)
+
+    def release(self) -> None:
+        handle = self.handle
+        self.handle = None
+        if handle is None:
+            return
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:  # pragma: no cover - exercised by Linux CI
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+@asynccontextmanager
+async def _computer_process_lock(computer_id: str) -> AsyncIterator[None]:
+    lock = _ProcessFileLock(computer_id)
+    await asyncio.to_thread(lock.acquire)
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(lock.release)
 
 
 def random_computer_id() -> str:
@@ -113,25 +187,30 @@ class ComputerRegistry:
                     record.owners += 1
                 return requested_id, record.sandbox
 
-            sandbox = await self.backend.attach_sandbox(requested_id)
-            if sandbox is not None:
-                actual_temporary = sandbox.temporary
-                if actual_temporary != temporary:
-                    raise BackendError(
-                        f"Computer '{requested_id}' already exists with "
-                        f"temporary={str(actual_temporary).lower()}; requested "
-                        f"temporary={str(temporary).lower()}."
+            # Separate stdio/HTTP MCP processes can share one persistent Docker
+            # computer. Serialize provider discovery and creation so a cold
+            # start cannot race into duplicate creates or conflicting startup
+            # mutations.
+            async with _computer_process_lock(requested_id):
+                sandbox = await self.backend.attach_sandbox(requested_id)
+                if sandbox is not None:
+                    actual_temporary = sandbox.temporary
+                    if actual_temporary != temporary:
+                        raise BackendError(
+                            f"Computer '{requested_id}' already exists with "
+                            f"temporary={str(actual_temporary).lower()}; requested "
+                            f"temporary={str(temporary).lower()}."
+                        )
+                else:
+                    sandbox = await self.backend.create_sandbox(
+                        computer_id=requested_id,
+                        temporary=temporary,
                     )
-            else:
-                sandbox = await self.backend.create_sandbox(
-                    computer_id=requested_id,
-                    temporary=temporary,
-                )
-                # Legacy backends keep their original Sandbox interface. These
-                # attributes let the base properties expose registry semantics
-                # without wrapping the instance or breaking backend-specific APIs.
-                self._tag(sandbox, requested_id, temporary)
-                actual_temporary = temporary
+                    # Legacy backends keep their original Sandbox interface. These
+                    # attributes let the base properties expose registry semantics
+                    # without wrapping the instance or breaking backend-specific APIs.
+                    self._tag(sandbox, requested_id, temporary)
+                    actual_temporary = temporary
 
             self._records[requested_id] = _ComputerRecord(
                 sandbox=sandbox,
@@ -145,6 +224,21 @@ class ComputerRegistry:
         async with self._lock:
             record = self._records.get(computer_id)
             return record.sandbox if record is not None else None
+
+    async def refresh(self, computer_id: str) -> Sandbox | None:
+        """Refresh cached state from the provider without changing ownership."""
+        computer_id = validate_computer_id(computer_id)
+        async with self._lock:
+            record = self._records.get(computer_id)
+            if record is None:
+                return None
+            replacement = await self.backend.refresh_sandbox(
+                computer_id,
+                record.sandbox,
+            )
+            self._tag(replacement, computer_id, record.temporary)
+            record.sandbox = replacement
+            return replacement
 
     def peek(self, computer_id: str) -> Sandbox | None:
         """Return a local sandbox for synchronous status properties."""
@@ -243,7 +337,11 @@ class ComputerRegistry:
             record = self._records.get(computer_id)
             if record is None:
                 raise BackendError(f"Computer '{computer_id}' was not found.")
-            replacement = await self.backend.set_network_access(computer_id, enabled)
+            async with _computer_process_lock(computer_id):
+                replacement = await self.backend.set_network_access(
+                    computer_id,
+                    enabled,
+                )
             if replacement is None:
                 raise BackendError("This backend cannot change network access at runtime.")
             self._tag(replacement, computer_id, record.temporary)
@@ -261,10 +359,11 @@ class ComputerRegistry:
             record = self._records.get(computer_id)
             if record is None:
                 raise BackendError(f"Computer '{computer_id}' was not found.")
-            updated = await self.backend.switch_desktop_environment(
-                computer_id,
-                enabled,
-            )
+            async with _computer_process_lock(computer_id):
+                updated = await self.backend.switch_desktop_environment(
+                    computer_id,
+                    enabled,
+                )
             if updated is None:
                 raise BackendError("This backend cannot switch desktop mode at runtime.")
             self._tag(updated, computer_id, record.temporary)

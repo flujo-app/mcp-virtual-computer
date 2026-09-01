@@ -338,6 +338,19 @@ class Backend(ABC):
         """
         return None
 
+    async def refresh_sandbox(
+        self,
+        computer_id: str,
+        sandbox: Sandbox,
+    ) -> Sandbox:
+        """Refresh provider-owned runtime state on an attached sandbox handle.
+
+        The default is intentionally a no-op for legacy and in-memory backends.
+        Provider backends should override this when another server process can
+        mutate state that is cached on the local ``Sandbox`` instance.
+        """
+        return sandbox
+
     async def list_computers(self) -> list[ComputerInfo]:
         """List provider-side managed computers visible to this backend."""
         return []

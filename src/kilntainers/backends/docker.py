@@ -920,6 +920,47 @@ class DockerBackend(Backend):
         await self._read_network_access(sandbox)
         return sandbox
 
+    async def refresh_sandbox(
+        self,
+        computer_id: str,
+        sandbox: Sandbox,
+    ) -> "DockerSandbox":
+        """Refresh live modes changed by another MCP server process."""
+        if not isinstance(sandbox, DockerSandbox):
+            replacement = await self.attach_sandbox(computer_id)
+            if replacement is None:
+                raise BackendError(f"Computer '{computer_id}' was not found.")
+            return replacement
+        if sandbox._desktop_host_port is None:
+            sandbox._desktop_environment = False
+            return sandbox
+        # Embedded MCP Apps poll runtime_status. Read both pieces of shared
+        # state in one Docker invocation so several clients can observe the
+        # same computer without each producing a stream of exec processes.
+        script = (
+            f"desktop=$(cat {DESKTOP_MODE_FILE} 2>/dev/null || printf false); "
+            f"if [ \"$desktop\" = true ] && ({self._desktop_ready_check()}); then "
+            "desktop=true; else desktop=false; fi; "
+            "if [ -f /run/mcp-network-disabled ]; then network=false; "
+            "else network=true; fi; "
+            "printf '%s\\n%s\\n' \"$desktop\" \"$network\""
+        )
+        returncode, stdout, _ = await self._run_docker(
+            "exec",
+            sandbox._container_id,
+            "sh",
+            "-c",
+            script,
+            check=False,
+            timeout=5,
+        )
+        if returncode == 0:
+            values = stdout.decode("utf-8", errors="replace").splitlines()
+            if len(values) >= 2:
+                sandbox._desktop_environment = values[0].strip().casefold() == "true"
+                sandbox._network_access = values[1].strip().casefold() == "true"
+        return sandbox
+
     async def list_computers(self) -> list[ComputerInfo]:
         """List all Docker computers owned by this server."""
         await self.validate()

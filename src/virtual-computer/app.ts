@@ -1244,6 +1244,12 @@ function drawVirtualScreen() {
 let rfb: RFB | null = null;
 let vncCanvas: HTMLCanvasElement | null = null;
 let desktopReconnectTimer: number | undefined;
+let pendingHostPasteGeneration: number | undefined;
+let hostPasteGeneration = 0;
+let hostPasteFallbackTimer: number | undefined;
+let suppressHostPasteKeyUp = false;
+let sendingVncPasteShortcut = false;
+const VNC_CLIPBOARD_SETTLE_MS = 90;
 const DESKTOP_AUDIO_SAMPLE_RATE = 48_000;
 const DESKTOP_AUDIO_CHANNELS = 2;
 let desktopAudioContext: AudioContext | null = null;
@@ -1346,6 +1352,80 @@ async function unlockDesktopAudio() {
   if (state.desktopEnvironment && state.desktopUrl) connectDesktopAudio(state.desktopUrl);
 }
 
+function desktopInputActive() {
+  return state.vncConnected
+    && rfb !== null
+    && (document.activeElement === vncCanvas || document.activeElement === sceneCanvas);
+}
+
+function cancelPendingHostPaste() {
+  pendingHostPasteGeneration = undefined;
+  suppressHostPasteKeyUp = false;
+  if (hostPasteFallbackTimer !== undefined) {
+    window.clearTimeout(hostPasteFallbackTimer);
+    hostPasteFallbackTimer = undefined;
+  }
+}
+
+function sendVncPasteShortcut(connection: RFB) {
+  if (rfb !== connection || !state.vncConnected || !vncCanvas) return;
+  sendingVncPasteShortcut = true;
+  try {
+    const dispatch = (type: "keydown" | "keyup", key: string, code: string, ctrlKey: boolean) => {
+      vncCanvas?.dispatchEvent(new KeyboardEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        key,
+        code,
+        ctrlKey,
+      }));
+    };
+    dispatch("keydown", "Control", "ControlLeft", true);
+    dispatch("keydown", "v", "KeyV", true);
+    dispatch("keyup", "v", "KeyV", true);
+    dispatch("keyup", "Control", "ControlLeft", false);
+  } finally {
+    sendingVncPasteShortcut = false;
+  }
+}
+
+function pasteHostClipboardIntoDesktop(text: string, generation: number) {
+  if (pendingHostPasteGeneration !== generation || !rfb || !state.vncConnected) return;
+  const connection = rfb;
+  pendingHostPasteGeneration = undefined;
+  if (hostPasteFallbackTimer !== undefined) {
+    window.clearTimeout(hostPasteFallbackTimer);
+    hostPasteFallbackTimer = undefined;
+  }
+  connection.clipboardPasteFrom(text);
+  window.setTimeout(() => sendVncPasteShortcut(connection), VNC_CLIPBOARD_SETTLE_MS);
+}
+
+function beginHostPasteShortcut() {
+  cancelPendingHostPaste();
+  const generation = ++hostPasteGeneration;
+  pendingHostPasteGeneration = generation;
+  suppressHostPasteKeyUp = true;
+  // A normal browser paste event is preferred because it also works when the
+  // Clipboard API is unavailable inside an embedded MCP App. readText is only
+  // a fallback for browsers that do not dispatch paste to noVNC's hidden canvas.
+  hostPasteFallbackTimer = window.setTimeout(() => {
+    hostPasteFallbackTimer = undefined;
+    if (pendingHostPasteGeneration !== generation || !navigator.clipboard?.readText) return;
+    void navigator.clipboard.readText()
+      .then((text) => pasteHostClipboardIntoDesktop(text, generation))
+      .catch(() => undefined);
+  }, 40);
+}
+
+function copyDesktopClipboardToHost(text: string) {
+  if (!navigator.clipboard?.writeText) return;
+  void navigator.clipboard.writeText(text).catch(() => {
+    // Clipboard writes can be denied by an embedding client's Permissions
+    // Policy. Host-to-desktop paste remains available through ClipboardEvent.
+  });
+}
+
 function disconnectDesktop() {
   if (desktopReconnectTimer !== undefined) {
     window.clearTimeout(desktopReconnectTimer);
@@ -1356,6 +1436,7 @@ function disconnectDesktop() {
   vncCanvas = null;
   state.vncConnected = false;
   state.desktopUrl = undefined;
+  cancelPendingHostPaste();
   stopDesktopAudio();
   if (connection) connection.disconnect();
   vncSource.replaceChildren();
@@ -1382,11 +1463,16 @@ function connectDesktop(url: string) {
       vncCanvas = vncSource.querySelector("canvas");
       connectDesktopAudio(url);
     });
+    connection.addEventListener("clipboard", (event: Event) => {
+      const text = (event as CustomEvent<{ text?: unknown }>).detail?.text;
+      if (typeof text === "string") copyDesktopClipboardToHost(text);
+    });
     connection.addEventListener("disconnect", () => {
       if (rfb !== connection) return;
       state.vncConnected = false;
       vncCanvas = null;
       rfb = null;
+      cancelPendingHostPaste();
       if (state.desktopEnvironment && state.desktopUrl === url) {
         desktopReconnectTimer = window.setTimeout(() => {
           desktopReconnectTimer = undefined;
@@ -1444,8 +1530,47 @@ function inferOperation(args: ToolArguments): Operation {
 
 function structuredOf<T>(value: unknown): T | undefined {
   if (!value || typeof value !== "object") return undefined;
-  const direct = value as { structuredContent?: T; result?: { structuredContent?: T } };
-  return direct.structuredContent ?? direct.result?.structuredContent;
+  const outer = value as { result?: unknown };
+  const candidate = outer.result && typeof outer.result === "object"
+    ? outer.result
+    : value;
+  const result = candidate as {
+    structuredContent?: T;
+    content?: Array<{ type?: unknown; text?: unknown }>;
+  };
+  if (result.structuredContent !== undefined) return result.structuredContent;
+  const text = result.content?.find((item) => item?.type === "text" && typeof item.text === "string")?.text;
+  if (typeof text !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return parsed && typeof parsed === "object" ? parsed as T : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function toolResultOf(value: unknown): {
+  isError?: boolean;
+  content?: Array<{ type?: unknown; text?: unknown }>;
+} | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const outer = value as { result?: unknown };
+  const candidate = outer.result && typeof outer.result === "object"
+    ? outer.result
+    : value;
+  return candidate as {
+    isError?: boolean;
+    content?: Array<{ type?: unknown; text?: unknown }>;
+  };
+}
+
+function toolErrorOf(value: unknown): string | undefined {
+  const result = toolResultOf(value);
+  if (!result?.isError) return undefined;
+  const payload = structuredOf<{ error?: unknown }>(value);
+  if (typeof payload?.error === "string") return payload.error;
+  const text = result.content?.find((item) => item?.type === "text" && typeof item.text === "string")?.text;
+  return typeof text === "string" && text.length > 0 ? text : "The MCP tool returned an error.";
 }
 
 function payloadOf(value: unknown): ComputerPayload | undefined {
@@ -1491,6 +1616,7 @@ const app = new App(
 let directClient: Client | null = null;
 let runtimePollInFlight = false;
 let runtimePollTimer: number | undefined;
+let runtimeStatusToolAvailable = true;
 
 async function callManualTool<T>(name: string, args: ToolArguments): Promise<T> {
   if (!manual.hostConnected) throw new Error("Open this computer through an MCP host to use its files and terminal.");
@@ -1499,6 +1625,8 @@ async function callManualTool<T>(name: string, args: ToolArguments): Promise<T> 
     const result = directClient
       ? await directClient.callTool({ name, arguments: args })
       : await app.callServerTool({ name, arguments: args });
+    const toolError = toolErrorOf(result);
+    if (toolError) throw new Error(toolError);
     const payload = structuredOf<T & { error?: string }>(result);
     if (!payload) throw new Error(`${name} returned no structured result.`);
     if (payload.error) throw new Error(payload.error);
@@ -1513,9 +1641,19 @@ async function pollRuntimeStatus() {
   if (!manual.hostConnected || runtimePollInFlight) return;
   runtimePollInFlight = true;
   try {
-    const result = directClient
-      ? await directClient.callTool({ name: "computer_ui", arguments: {} })
-      : await app.callServerTool({ name: "computer_ui", arguments: {} });
+    const call = (name: string) => directClient
+      ? directClient.callTool({ name, arguments: {} })
+      : app.callServerTool({ name, arguments: {} });
+    let result: unknown;
+    try {
+      result = await call(runtimeStatusToolAvailable ? "runtime_status" : "computer_ui");
+      const toolError = toolErrorOf(result);
+      if (toolError) throw new Error(toolError);
+    } catch (error) {
+      if (!runtimeStatusToolAvailable) throw error;
+      runtimeStatusToolAvailable = false;
+      result = await call("computer_ui");
+    }
     const payload = payloadOf(result);
     if (!payload) return;
     applyPayload(payload);
@@ -1529,7 +1667,7 @@ async function pollRuntimeStatus() {
 function startRuntimePolling() {
   if (runtimePollTimer !== undefined) return;
   void pollRuntimeStatus();
-  runtimePollTimer = window.setInterval(() => void pollRuntimeStatus(), 350);
+  runtimePollTimer = window.setInterval(() => void pollRuntimeStatus(), 1000);
 }
 
 async function toggleNetworkCable() {
@@ -2013,12 +2151,40 @@ app.ontoolresult = (params) => {
 
 window.addEventListener("resize", resize);
 window.addEventListener("keydown", (event) => {
+  if (
+    !sendingVncPasteShortcut
+    && desktopInputActive()
+    && event.code === "KeyV"
+    && (event.ctrlKey || event.metaKey)
+    && !event.altKey
+  ) {
+    livePressedCodes.add(visualCodeForPhysicalKey(event.code));
+    beginHostPasteShortcut();
+    // Keep the browser's default action so it emits ClipboardEvent, but keep
+    // the original V key away from noVNC until the remote clipboard is ready.
+    event.stopImmediatePropagation();
+    return;
+  }
   if (state.vncConnected && document.activeElement === vncCanvas) {
     livePressedCodes.add(visualCodeForPhysicalKey(event.code));
   }
 }, { capture: true });
 window.addEventListener("keyup", (event) => {
+  if (!sendingVncPasteShortcut && suppressHostPasteKeyUp && event.code === "KeyV") {
+    suppressHostPasteKeyUp = false;
+    livePressedCodes.delete(visualCodeForPhysicalKey(event.code));
+    event.stopImmediatePropagation();
+    return;
+  }
   if (state.vncConnected) livePressedCodes.delete(visualCodeForPhysicalKey(event.code));
+}, { capture: true });
+window.addEventListener("paste", (event) => {
+  if (!desktopInputActive() || !event.clipboardData) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const generation = pendingHostPasteGeneration ?? ++hostPasteGeneration;
+  pendingHostPasteGeneration = generation;
+  pasteHostClipboardIntoDesktop(event.clipboardData.getData("text/plain"), generation);
 }, { capture: true });
 sceneCanvas.addEventListener("pointermove", (event) => {
   const point = screenPoint(event);
@@ -2159,12 +2325,18 @@ resize();
 animate();
 
 async function connectDirectLocalServer() {
-  if (!/^https?:$/.test(window.location.protocol)) return;
+  const standaloneHost = ["127.0.0.1", "localhost", "[::1]"].includes(window.location.hostname);
+  if (
+    window.parent !== window
+    || !/^https?:$/.test(window.location.protocol)
+    || !standaloneHost
+    || !window.location.pathname.endsWith("/dashboard.html")
+  ) return;
   const client = new Client(
     { name: "mcp-virtual-computer-browser", version: "0.2.2" },
     { capabilities: {} },
   );
-  const transport = new StreamableHTTPClientTransport(new URL("/mcp", window.location.href));
+  const transport = new StreamableHTTPClientTransport(new URL("/mcp", window.location.origin));
   try {
     await client.connect(transport);
     const result = await client.callTool({ name: "computer_ui", arguments: {} });
