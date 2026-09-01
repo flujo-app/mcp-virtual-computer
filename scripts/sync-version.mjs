@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = readJson("package.json");
 const version = packageJson.version;
-const distribution = "mcp-sandbox-computer-vm-for-ai";
+const distribution = "mcp-virtual-computer";
 const checkOnly = process.argv.includes("--check");
 let failed = false;
 let changed = 0;

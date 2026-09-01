@@ -125,7 +125,7 @@ console.log(
 
 function verifyMetadata() {
   const problems = [];
-  const distribution = "mcp-sandbox-computer-vm-for-ai";
+  const distribution = "mcp-virtual-computer";
   const marker = `mcp-name: ${serverName}`;
   if (server.version !== version) {
     problems.push(`server.json version does not match package.json ${version}`);

@@ -314,18 +314,22 @@ async def test_response_json_contains_all_fields(
 
     assert set(response_json.keys()) == {
         "computer_id",
-        "temporary",
+        "operation",
+        "desktop_environment",
+        "desktop_url",
         "stdout",
         "stderr",
         "exit_code",
-        "exec_duration_ms",
+            "exec_duration_ms",
+            "network_access",
     }
     assert response_json["stdout"] == "out"
     assert response_json["stderr"] == "err"
     assert response_json["exit_code"] == 0
     assert response_json["exec_duration_ms"] == 42
     assert isinstance(response_json["computer_id"], str)
-    assert response_json["temporary"] is True
+    assert response_json["operation"] == "terminal_execute"
+    assert response_json["desktop_environment"] is False
 
 
 # --- Handler Error Response Tests ---
@@ -521,8 +525,8 @@ async def test_lifespan_cancels_death_task_on_exit(mock_backend: MockBackend) ->
     assert death_task.cancelled()
 
 
-async def test_lifespan_calls_sandbox_stop_on_exit(mock_backend: MockBackend) -> None:
-    """On exit, sandbox.stop() is called (after sandbox is created)."""
+async def test_lifespan_keeps_persistent_sandbox_on_exit(mock_backend: MockBackend) -> None:
+    """Session cleanup releases but does not stop the persistent computer."""
     lifespan_fn = create_lifespan(mock_backend, "stdio")
     mock_server = MagicMock()
 
@@ -531,14 +535,13 @@ async def test_lifespan_calls_sandbox_stop_on_exit(mock_backend: MockBackend) ->
         sandbox = cast(MockSandbox, await ctx.get_or_create_sandbox())
         assert not sandbox.is_stopped()
 
-    # After exit, sandbox should be stopped
-    assert sandbox.is_stopped()
+    assert not sandbox.is_stopped()
 
 
-async def test_lifespan_stops_sandbox_even_if_exception_raised(
+async def test_lifespan_keeps_persistent_sandbox_if_exception_raised(
     mock_backend: MockBackend,
 ) -> None:
-    """Sandbox stop is called even if the body raises an exception."""
+    """An MCP session error does not delete the persistent computer."""
     lifespan_fn = create_lifespan(mock_backend, "stdio")
     mock_server = MagicMock()
 
@@ -550,9 +553,8 @@ async def test_lifespan_stops_sandbox_even_if_exception_raised(
             sandbox = cast(MockSandbox, await ctx.get_or_create_sandbox())
             raise ValueError("test error")
 
-    # Sandbox should still be stopped
     assert sandbox is not None
-    assert sandbox.is_stopped()
+    assert not sandbox.is_stopped()
 
 
 async def test_death_triggers_sigterm_stdio(
@@ -672,7 +674,7 @@ async def test_session_context_cleanup_without_sandbox(
 
 
 async def test_session_context_cleanup_with_sandbox(mock_backend: MockBackend) -> None:
-    """Create sandbox, then cleanup. Death task cancelled, sandbox stopped."""
+    """Cleanup cancels monitoring but preserves the persistent sandbox."""
     ctx = SessionContext(backend=mock_backend, transport="stdio")
 
     sandbox = cast(MockSandbox, await ctx.get_or_create_sandbox())
@@ -685,7 +687,7 @@ async def test_session_context_cleanup_with_sandbox(mock_backend: MockBackend) -
     await ctx.cleanup()
 
     assert death_task.cancelled()
-    assert sandbox.is_stopped()
+    assert not sandbox.is_stopped()
 
 
 async def test_session_context_retry_on_creation_failure(
@@ -754,7 +756,7 @@ def test_create_server_returns_fastmcp(mock_backend: MockBackend) -> None:
 
     # Just verify it's a FastMCP instance with expected attributes
     assert hasattr(server, "name")
-    assert server.name == "Kilntainers"
+    assert server.name == "MCP Virtual Computer"
 
 
 def test_create_server_with_lifespan(mock_backend: MockBackend) -> None:
@@ -763,7 +765,7 @@ def test_create_server_with_lifespan(mock_backend: MockBackend) -> None:
     server = create_server(mock_backend, config)
 
     # Verify a FastMCP instance was created
-    assert server.name == "Kilntainers"
+    assert server.name == "MCP Virtual Computer"
 
 
 def test_create_server_with_override_description(mock_backend: MockBackend) -> None:
@@ -792,4 +794,56 @@ def test_create_server_with_extended_description(mock_backend: MockBackend) -> N
     server = create_server(mock_backend, config)
 
     # Server should be created successfully
-    assert server.name == "Kilntainers"
+    assert server.name == "MCP Virtual Computer"
+
+
+def test_public_tool_schemas_have_no_lifecycle_selector(mock_backend: MockBackend) -> None:
+    """Computer identity and persistence are startup configuration only."""
+    server = create_server(mock_backend, ServerConfig(computer_id="fixed-computer"))
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+
+    assert set(tools) == {
+        "terminal_execute",
+        "computer_ui",
+        "list_directory",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "set_network_access",
+        "set_desktop_environment",
+        "runtime_status",
+    }
+    for tool in tools.values():
+        properties = tool.parameters.get("properties", {})
+        assert "computer_id" not in properties
+        assert "temporary" not in properties
+
+
+def test_desktop_mode_exposes_screen_and_interaction_surface(
+    mock_backend: MockBackend,
+) -> None:
+    """Xfce-only inspection and interaction capabilities are conditionally public."""
+    server = create_server(
+        mock_backend,
+        ServerConfig(computer_id="fixed-computer", desktop_environment=True),
+    )
+    tools = {tool.name for tool in server._tool_manager.list_tools()}
+    resources = {
+        str(resource.uri) for resource in server._resource_manager.list_resources()
+    }
+
+    assert {
+        "look_at_screen",
+        "click",
+        "type",
+        "scroll",
+        "list_windows",
+        "switch_window",
+        "move_window",
+        "maximize_window",
+        "restore_window",
+        "minimize_window",
+        "close_window",
+    } <= tools
+    assert "computer://screen/current.png" in resources
+    assert "computer://screen/accessibility.json" in resources

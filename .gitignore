@@ -9,4 +9,6 @@ dist/
 .env
 .coverage
 .tools/
+node_modules/
+/artifacts/
 

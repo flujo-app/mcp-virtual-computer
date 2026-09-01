@@ -1,5 +1,5 @@
 services:
-  mcp-sandbox:
+  virtual-computer:
     build: .
     command:
       - --transport
@@ -8,9 +8,11 @@ services:
       - 0.0.0.0
       - --port
       - "8080"
-      - --backend
-      - docker
       - --allow-unauthenticated-http
+    environment:
+      COMPUTER_ID: ${COMPUTER_ID:-agent-workstation}
+      DESKTOP_ENVIRONMENT: ${DESKTOP_ENVIRONMENT:-false}
+      NETWORK_ACCESS: ${NETWORK_ACCESS:-true}
     ports:
       - "127.0.0.1:8080:8080"
     volumes:

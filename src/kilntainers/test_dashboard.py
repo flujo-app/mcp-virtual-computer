@@ -1,4 +1,4 @@
-"""MCP Apps dashboard registration and static auth tests."""
+"""Three.js MCP App registration and static auth tests."""
 
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
@@ -12,28 +12,33 @@ from kilntainers.dashboard import DASHBOARD_MIME_TYPE, DASHBOARD_URI
 from kilntainers.server import create_server
 
 
-def test_dashboard_tool_resource_and_extension_are_registered() -> None:
-    server = create_server(
-        MockBackend(BackendConfig()), ServerConfig(enable_lifecycle_tools=True)
-    )
+def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
+    server = create_server(MockBackend(BackendConfig()), ServerConfig())
     tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
     resources = server._resource_manager.list_resources()
 
     assert set(tools) == {
         "terminal_execute",
-        "computer_dashboard",
-        "computer_list",
-        "computer_create",
-        "computer_restart",
-        "computer_factory_reset",
-        "computer_delete",
+        "computer_ui",
+        "list_directory",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "set_network_access",
+        "set_desktop_environment",
+        "runtime_status",
     }
-    assert tools["computer_dashboard"].meta == {
+    assert tools["computer_ui"].meta == {
         "ui": {
             "visibility": ["model", "app"],
             "resourceUri": DASHBOARD_URI,
-        }
+        },
+        "openai/outputTemplate": DASHBOARD_URI,
     }
+    assert tools["list_directory"].meta == {"ui": {"visibility": ["app"]}}
+    assert tools["set_network_access"].meta == {"ui": {"visibility": ["app"]}}
+    assert tools["set_desktop_environment"].meta == {"ui": {"visibility": ["app"]}}
+    assert tools["runtime_status"].meta == {"ui": {"visibility": ["app"]}}
     assert len(resources) == 1
     assert str(resources[0].uri) == DASHBOARD_URI
     assert resources[0].mime_type == DASHBOARD_MIME_TYPE
@@ -45,22 +50,23 @@ def test_dashboard_tool_resource_and_extension_are_registered() -> None:
     }
 
 
-async def test_dashboard_html_is_self_contained_and_calls_management_tools() -> None:
-    server = create_server(
-        MockBackend(BackendConfig()), ServerConfig(enable_lifecycle_tools=True)
-    )
+async def test_virtual_computer_html_is_self_contained() -> None:
+    server = create_server(MockBackend(BackendConfig()), ServerConfig())
     resource = server._resource_manager.list_resources()[0]
     html = await resource.read()
 
     assert isinstance(html, str)
-    assert "2026-01-26" in html
-    assert 'callTool("computer_list"' in html
-    assert 'callTool("terminal_execute"' in html
+    assert "Virtual Computer" in html
+    assert "Interactive 3D laptop on a desk" in html
+    assert "Request Received" not in html
+    assert "No operations will be simulated" not in html
+    assert 'pathname="/audio"' in html
+    assert "AudioContext" in html
     assert "<script src=" not in html
     assert "<link rel=" not in html
 
 
-def test_lifecycle_tools_and_dashboard_are_disabled_by_default() -> None:
+def test_lifecycle_management_tools_are_not_exposed() -> None:
     server = create_server(MockBackend(BackendConfig()), ServerConfig())
 
     tools = {tool.name for tool in server._tool_manager.list_tools()}
@@ -68,9 +74,11 @@ def test_lifecycle_tools_and_dashboard_are_disabled_by_default() -> None:
     capabilities = server._mcp_server.create_initialization_options().capabilities
     payload = capabilities.model_dump(by_alias=True, exclude_none=True)
 
-    assert tools == {"terminal_execute"}
-    assert resources == []
-    assert "extensions" not in payload
+    assert not any(name.startswith("computer_") and name != "computer_ui" for name in tools)
+    assert len(resources) == 1
+    assert payload["extensions"] == {
+        "io.modelcontextprotocol/ui": {"mimeTypes": [DASHBOARD_MIME_TYPE]}
+    }
 
 
 async def _ok(request):

@@ -4,7 +4,9 @@ import argparse
 import asyncio
 import json
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from importlib.resources import files
 from typing import cast
 
 from kilntainers.backends.base import (
@@ -15,14 +17,25 @@ from kilntainers.backends.base import (
     Sandbox,
 )
 from kilntainers.computers import random_computer_id
-from kilntainers.config import BackendConfig
+from kilntainers.config import BackendConfig, env_flag
 from kilntainers.errors import BackendError, SandboxDiedError
+from kilntainers.windows_docker import (
+    DockerRuntimeProgress,
+    initial_docker_runtime_status,
+    prepare_windows_docker_runtime,
+)
 
 DEFAULT_IMAGE = "debian:bookworm-slim"
+DEFAULT_DESKTOP_IMAGE = "mcp-virtual-computer-desktop:bookworm"
 COMPUTER_NAME_PREFIX = "kilntainer-"
 COMPUTER_ID_LABEL = "kilntainers.computer-id"
 TEMPORARY_LABEL = "kilntainers.temporary"
 IMAGE_LABEL = "kilntainers.image"
+DESKTOP_LABEL = "mcp-virtual-computer.desktop"
+WORKSPACE_LABEL = "mcp-virtual-computer.workspace"
+DESKTOP_MODE_FILE = "/var/lib/mcp-virtual-computer/desktop-enabled"
+DESKTOP_IMAGE_VERSION_LABEL = "mcp-virtual-computer.image-version"
+DESKTOP_IMAGE_VERSION = "2"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -37,10 +50,12 @@ class DockerBackendConfig(BackendConfig):
     host: str | None = None
     image: str = "debian:bookworm-slim"
     shell: str = "/bin/bash"
-    network_enabled: bool = False
+    network_enabled: bool = True
     cpu: str | None = None
     memory: str | None = None
     docker_run_flags: list[str] = field(default_factory=list)
+    desktop_environment: bool = False
+    workspace_directory: str = "/workspace"
 
 
 class _OutputLimitExceeded(Exception):
@@ -64,6 +79,10 @@ class _DockerSandboxState:
     computer_id: str | None = None
     temporary: bool = True
     image: str | None = None
+    desktop_environment: bool = False
+    network_access: bool = True
+    workspace_directory: str = "/workspace"
+    desktop_host_port: int | None = None
 
 
 class DockerBackend(Backend):
@@ -92,8 +111,8 @@ class DockerBackend(Backend):
         )
         group.add_argument(
             "--image",
-            default="debian:bookworm-slim",
-            help="Docker image (default: debian:bookworm-slim)",
+            default=DEFAULT_DESKTOP_IMAGE,
+            help=f"Docker image (default: {DEFAULT_DESKTOP_IMAGE})",
         )
         group.add_argument(
             "--cpu",
@@ -121,22 +140,134 @@ class DockerBackend(Backend):
         """Build DockerBackendConfig from parsed CLI arguments."""
         # Use core --shell with a backend-specific default
         shell = args.shell if args.shell is not None else "/bin/bash"
+        desktop_environment = env_flag("DESKTOP_ENVIRONMENT", default=False)
+        image = args.image
+        network_access = env_flag("NETWORK_ACCESS", default=args.network)
         return DockerBackendConfig(
             engine=args.engine,
             host=args.docker_host,
-            image=args.image,
+            image=image,
             shell=shell,
-            network_enabled=args.network,
+            network_enabled=network_access,
             cpu=args.cpu,
             memory=args.memory,
             docker_run_flags=args.docker_run_flags or [],
             default_timeout=args.timeout,
+            desktop_environment=desktop_environment,
+            workspace_directory="/workspace",
         )
 
     def __init__(self, config: DockerBackendConfig) -> None:
         super().__init__(config)
         # Override parent's _config with more specific type for type checker
         self._config: DockerBackendConfig = config
+        self._runtime_task: asyncio.Task[None] | None = None
+        self._runtime_error: BackendError | None = None
+        self._runtime_progress = initial_docker_runtime_status(config.engine)
+        self._runtime_reporters: dict[
+            Callable[[DockerRuntimeProgress], Awaitable[None]], float
+        ] = {}
+        self._runtime_notification_tasks: set[asyncio.Task[None]] = set()
+
+    async def _notify_runtime_reporter(
+        self,
+        reporter: Callable[[DockerRuntimeProgress], Awaitable[None]],
+        update: DockerRuntimeProgress,
+    ) -> None:
+        try:
+            await reporter(update)
+        except Exception:
+            # Progress is best-effort and must never break runtime preparation.
+            pass
+
+    def _accept_runtime_progress(self, update: DockerRuntimeProgress) -> None:
+        self._runtime_progress = update
+        for reporter, previous in tuple(self._runtime_reporters.items()):
+            if update.progress <= previous:
+                continue
+            self._runtime_reporters[reporter] = update.progress
+            task = asyncio.create_task(self._notify_runtime_reporter(reporter, update))
+            self._runtime_notification_tasks.add(task)
+            task.add_done_callback(self._runtime_notification_tasks.discard)
+
+    async def _prepare_windows_runtime(self) -> None:
+        loop = asyncio.get_running_loop()
+        latest = self._runtime_progress
+
+        def report(update: DockerRuntimeProgress) -> None:
+            nonlocal latest
+            latest = update
+            loop.call_soon_threadsafe(self._accept_runtime_progress, update)
+
+        try:
+            await asyncio.to_thread(
+                prepare_windows_docker_runtime,
+                engine=self._config.engine,
+                host=self._config.host,
+                report=report,
+            )
+            self._accept_runtime_progress(latest)
+        except BackendError as error:
+            self._runtime_error = error
+            self._accept_runtime_progress(
+                DockerRuntimeProgress(
+                    state="failed",
+                    phase="failed",
+                    message="Docker setup failed.",
+                    progress=self._runtime_progress.progress,
+                    error=str(error),
+                )
+            )
+        except Exception as error:
+            wrapped = BackendError(f"Unexpected Docker setup failure: {error}")
+            self._runtime_error = wrapped
+            self._accept_runtime_progress(
+                DockerRuntimeProgress(
+                    state="failed",
+                    phase="failed",
+                    message="Docker setup failed.",
+                    progress=self._runtime_progress.progress,
+                    error=str(wrapped),
+                )
+            )
+
+    def start_runtime_preparation(self) -> None:
+        """Start the Windows Docker check/install task on first use."""
+        if self._runtime_progress.state == "ready":
+            return
+        if self._runtime_task is not None and not self._runtime_task.done():
+            return
+        if self._runtime_error is not None:
+            # A new user invocation is an explicit retry after external repair.
+            self._runtime_error = None
+            self._runtime_progress = initial_docker_runtime_status(self._config.engine)
+        self._runtime_task = asyncio.create_task(self._prepare_windows_runtime())
+
+    async def ensure_runtime(
+        self,
+        progress: Callable[[DockerRuntimeProgress], Awaitable[None]] | None = None,
+    ) -> None:
+        """Wait for lazy Docker preparation while preserving it on cancellation."""
+        if self._runtime_progress.state == "ready":
+            return
+        self.start_runtime_preparation()
+        if progress is not None:
+            self._runtime_reporters[progress] = -1.0
+            if self._runtime_progress.state != "pending":
+                self._runtime_reporters[progress] = self._runtime_progress.progress
+                await self._notify_runtime_reporter(progress, self._runtime_progress)
+        try:
+            assert self._runtime_task is not None
+            await asyncio.shield(self._runtime_task)
+        finally:
+            if progress is not None:
+                self._runtime_reporters.pop(progress, None)
+        if self._runtime_error is not None:
+            raise self._runtime_error
+
+    def runtime_status(self) -> dict[str, object]:
+        """Expose genuine Windows Docker setup state to the MCP App."""
+        return self._runtime_progress.to_dict()
 
     @property
     def _engine_prefix(self) -> list[str]:
@@ -201,6 +332,7 @@ class DockerBackend(Backend):
 
         Checks that the Docker engine is reachable and responsive.
         """
+        await self.ensure_runtime()
         try:
             await self._run_docker("info", timeout=10)
         except BackendError:
@@ -209,18 +341,60 @@ class DockerBackend(Backend):
                 f"Is the {self._config.engine} daemon running?"
             )
 
-    async def _ensure_image(self) -> None:
+    async def _ensure_image(
+        self,
+        image: str | None = None,
+        *,
+        desktop_environment: bool | None = None,
+    ) -> None:
         """Pull the configured image if not available locally."""
+        image = image or self._config.image
+        desktop_environment = (
+            self._config.desktop_environment
+            if desktop_environment is None
+            else desktop_environment
+        )
         # Check if image exists locally
-        returncode, _, _ = await self._run_docker(
+        returncode, stdout, _ = await self._run_docker(
             "image",
             "inspect",
-            self._config.image,
+            image,
             check=False,
             timeout=10,
         )
         if returncode == 0:
-            return  # Image already available
+            if image != DEFAULT_DESKTOP_IMAGE:
+                return
+            try:
+                image_data = json.loads(stdout)
+                labels = image_data[0]["Config"]["Labels"]
+                if (
+                    isinstance(labels, dict)
+                    and labels.get(DESKTOP_IMAGE_VERSION_LABEL)
+                    == DESKTOP_IMAGE_VERSION
+                ):
+                    return
+            except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+                pass
+            # Rebuild a stale bundled image under the same local tag. Running
+            # persistent containers keep their writable layer and are untouched.
+
+        if image == DEFAULT_DESKTOP_IMAGE:
+            context = files("kilntainers").joinpath("desktop_image")
+            try:
+                await self._run_docker(
+                    "build",
+                    "--tag",
+                    image,
+                    str(context),
+                    timeout=900,
+                )
+            except BackendError as error:
+                raise BackendError(
+                    "Failed to build the bundled Xfce desktop image. "
+                    f"Docker reported: {error}"
+                )
+            return
 
         # Pull with progress output to stderr
         # Don't use _run_docker because we want stderr to pass through
@@ -228,14 +402,14 @@ class DockerBackend(Backend):
         proc = await asyncio.create_subprocess_exec(
             *self._engine_prefix,
             "pull",
-            self._config.image,
+            image,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=None,  # inherit parent stderr — shows pull progress
         )
         await proc.wait()
         if proc.returncode != 0:
             raise BackendError(
-                f"Failed to pull image '{self._config.image}'. "
+                f"Failed to pull image '{image}'. "
                 f"Check that the image name is correct and the registry is reachable."
             )
 
@@ -244,9 +418,22 @@ class DockerBackend(Backend):
         *,
         computer_id: str | None = None,
         temporary: bool = True,
+        desktop_environment: bool | None = None,
+        network_access: bool | None = None,
+        image: str | None = None,
     ) -> list[str]:
         """Build the docker run argument list."""
         computer_id = computer_id or random_computer_id()
+        desktop_environment = (
+            self._config.desktop_environment
+            if desktop_environment is None
+            else desktop_environment
+        )
+        network_access = (
+            self._config.network_enabled if network_access is None else network_access
+        )
+        image = image or self._config.image
+        desktop_capable = desktop_environment or image == DEFAULT_DESKTOP_IMAGE
         cmd = [
             "run",
             "-d",  # detached mode
@@ -257,17 +444,26 @@ class DockerBackend(Backend):
             "--label",
             f"{TEMPORARY_LABEL}={str(temporary).lower()}",
             "--label",
-            f"{IMAGE_LABEL}={self._config.image}",
+            f"{IMAGE_LABEL}={image}",
+            "--label",
+            f"{DESKTOP_LABEL}={str(desktop_environment).lower()}",
+            "--label",
+            f"{WORKSPACE_LABEL}={self._config.workspace_directory}",
             "--name",
             f"{COMPUTER_NAME_PREFIX}{computer_id}",
+            "--workdir",
+            self._config.workspace_directory,
         ]
 
         if temporary:
             # Temporary computers disappear when stopped by session cleanup.
             cmd.append("--rm")
 
-        # Network isolation (default: disabled)
-        if not self._config.network_enabled:
+        # Plain headless images can use Docker's complete network namespace
+        # isolation. Desktop-capable computers keep the bridge so their local
+        # noVNC transport stays available while Xfce is toggled off; their
+        # bundled entrypoint applies an OUTPUT firewall instead.
+        if not network_access and not desktop_capable:
             cmd.extend(["--network", "none"])
 
         # Resource limits
@@ -276,13 +472,32 @@ class DockerBackend(Backend):
         if self._config.memory is not None:
             cmd.extend(["--memory", self._config.memory])
 
+        if desktop_capable:
+            # Bind the browser transport to loopback on an ephemeral host port.
+            cmd.extend(
+                [
+                    "--init",
+                    "--publish",
+                    "127.0.0.1::6080",
+                    "--shm-size",
+                    "256m",
+                    "--cap-add",
+                    "NET_ADMIN",
+                    "--env",
+                    f"NETWORK_ACCESS={str(network_access).lower()}",
+                    "--env",
+                    f"DESKTOP_ENVIRONMENT={str(desktop_environment).lower()}",
+                ]
+            )
+
         # User-provided extra flags (escape hatch)
         for flag in self._config.docker_run_flags:
             cmd.append(flag)
 
         # Image and keep-alive command
-        cmd.append(self._config.image)
-        cmd.extend(["tail", "-f", "/dev/null"])
+        cmd.append(image)
+        if not desktop_capable:
+            cmd.extend(["tail", "-f", "/dev/null"])
 
         return cmd
 
@@ -291,6 +506,9 @@ class DockerBackend(Backend):
         *,
         computer_id: str | None = None,
         temporary: bool = True,
+        desktop_environment: bool | None = None,
+        network_access: bool | None = None,
+        image: str | None = None,
     ) -> "DockerSandbox":
         """Create a Docker sandbox.
 
@@ -301,19 +519,47 @@ class DockerBackend(Backend):
         4. Verify readiness (cleanup if fails)
         """
         computer_id = computer_id or random_computer_id()
+        desktop_environment = (
+            self._config.desktop_environment
+            if desktop_environment is None
+            else desktop_environment
+        )
+        network_access = (
+            self._config.network_enabled if network_access is None else network_access
+        )
+        image = image or self._config.image
+        desktop_capable = desktop_environment or image == DEFAULT_DESKTOP_IMAGE
 
         # 1. Ensure image is available (pull if needed)
-        await self._ensure_image()
+        await self._ensure_image(image, desktop_environment=desktop_environment)
 
         # 2. Build docker run command
         cmd = self._build_run_command(
             computer_id=computer_id,
             temporary=temporary,
+            desktop_environment=desktop_environment,
+            network_access=network_access,
+            image=image,
         )
 
         # 3. Create and start container
         _, stdout, _ = await self._run_docker(*cmd, timeout=30)
         container_id = stdout.decode().strip()
+        try:
+            desktop_host_port = (
+                await self._published_desktop_port(container_id)
+                if desktop_capable
+                else None
+            )
+        except Exception:
+            await self._run_docker(
+                "rm",
+                "-f",
+                container_id,
+                check=False,
+                timeout=20,
+            )
+            raise
 
         # 4. Create sandbox state
         state = _DockerSandboxState(
@@ -323,7 +569,11 @@ class DockerBackend(Backend):
             container_id=container_id,
             computer_id=computer_id,
             temporary=temporary,
-            image=self._config.image,
+            image=image,
+            desktop_environment=desktop_environment,
+            network_access=network_access,
+            workspace_directory=self._config.workspace_directory,
+            desktop_host_port=desktop_host_port,
         )
 
         # 5. Create sandbox object
@@ -338,6 +588,46 @@ class DockerBackend(Backend):
             raise
 
         return sandbox
+
+    async def _published_desktop_port(self, container_id: str) -> int:
+        """Return Docker's ephemeral loopback port for the noVNC websocket."""
+        for _ in range(20):
+            returncode, stdout, _ = await self._run_docker(
+                "port",
+                container_id,
+                "6080/tcp",
+                check=False,
+                timeout=5,
+            )
+            if returncode == 0:
+                address = stdout.decode("utf-8", errors="replace").strip().splitlines()
+                if address:
+                    try:
+                        return int(address[0].rsplit(":", 1)[1])
+                    except (IndexError, ValueError):
+                        pass
+            await asyncio.sleep(0.1)
+        raise BackendError("Docker did not publish the desktop websocket port.")
+
+    @staticmethod
+    def _desktop_port_from_inspect(data: dict[str, object]) -> int | None:
+        network = data.get("NetworkSettings", {})
+        network = (
+            cast("dict[str, object]", network) if isinstance(network, dict) else {}
+        )
+        ports = network.get("Ports", {})
+        ports = cast("dict[str, object]", ports) if isinstance(ports, dict) else {}
+        bindings = ports.get("6080/tcp")
+        if not isinstance(bindings, list) or not bindings:
+            return None
+        binding = bindings[0]
+        if not isinstance(binding, dict):
+            return None
+        binding = cast("dict[str, object]", binding)
+        try:
+            return int(str(binding.get("HostPort", "")))
+        except ValueError:
+            return None
 
     async def _inspect_computer(self, computer_id: str) -> dict[str, object] | None:
         """Return Docker inspect data for an owned named computer."""
@@ -379,6 +669,44 @@ class DockerBackend(Backend):
         computer_id = str(labels.get(COMPUTER_ID_LABEL, ""))
         temporary = str(labels.get(TEMPORARY_LABEL, "true")).lower() == "true"
         image = str(labels.get(IMAGE_LABEL) or self._config.image)
+        desktop_environment = str(labels.get(DESKTOP_LABEL, "false")).lower() == "true"
+        workspace_directory = str(
+            labels.get(WORKSPACE_LABEL) or self._config.workspace_directory
+        )
+        network_data = data.get("NetworkSettings", {})
+        network_data = (
+            cast("dict[str, object]", network_data)
+            if isinstance(network_data, dict)
+            else {}
+        )
+        networks = network_data.get("Networks", {})
+        networks = (
+            cast("dict[str, object]", networks) if isinstance(networks, dict) else {}
+        )
+        desktop_host_port = self._desktop_port_from_inspect(data)
+        desktop_capable = desktop_host_port is not None
+        if desktop_capable:
+            raw_environment = config.get("Env", [])
+            environment = (
+                cast("list[object]", raw_environment)
+                if isinstance(raw_environment, list)
+                else []
+            )
+            configured_network = next(
+                (
+                    str(value).split("=", 1)[1]
+                    for value in environment
+                    if isinstance(value, str) and value.startswith("NETWORK_ACCESS=")
+                ),
+                "true",
+            )
+            network_access = configured_network.casefold() == "true"
+        else:
+            network_access = (
+                any(name != "none" for name in networks)
+                if networks
+                else self._config.network_enabled
+            )
         return DockerSandbox(
             _DockerSandboxState(
                 engine=self._config.engine,
@@ -388,7 +716,118 @@ class DockerBackend(Backend):
                 computer_id=computer_id,
                 temporary=temporary,
                 image=image,
+                desktop_environment=desktop_environment,
+                network_access=network_access,
+                workspace_directory=workspace_directory,
+                desktop_host_port=desktop_host_port,
             )
+        )
+
+    async def _read_desktop_mode(self, sandbox: "DockerSandbox") -> bool:
+        """Read the live usable mode, falling back to the old label."""
+        if sandbox._desktop_host_port is None:
+            sandbox._desktop_environment = False
+            return False
+        returncode, stdout, _ = await self._run_docker(
+            "exec",
+            sandbox._container_id,
+            "sh",
+            "-c",
+            f"cat {DESKTOP_MODE_FILE}",
+            check=False,
+            timeout=5,
+        )
+        if returncode == 0:
+            value = stdout.decode("utf-8", errors="replace").strip().casefold()
+            if value in {"true", "false"}:
+                sandbox._desktop_environment = value == "true"
+        if sandbox._desktop_environment:
+            # The state file records intent. Do not advertise Xfce unless both
+            # the desktop session and VNC backend are genuinely available.
+            returncode, _, _ = await self._run_docker(
+                "exec",
+                sandbox._container_id,
+                "sh",
+                "-c",
+                self._desktop_ready_check(),
+                check=False,
+                timeout=5,
+            )
+            sandbox._desktop_environment = returncode == 0
+        return sandbox.desktop_environment
+
+    @staticmethod
+    def _desktop_ready_check() -> str:
+        """Shell predicate for a usable Xfce session and its VNC transport."""
+        return (
+            "ps -C xfce4-session -o stat= 2>/dev/null "
+            "| grep -qv '^[[:space:]]*Z' && "
+            "ps -C x11vnc -o stat= 2>/dev/null "
+            "| grep -qv '^[[:space:]]*Z' && "
+            "pgrep -f '[p]ython3 /usr/local/bin/wsproxy' >/dev/null"
+        )
+
+    async def _set_desktop_mode(
+        self,
+        sandbox: "DockerSandbox",
+        enabled: bool,
+    ) -> "DockerSandbox":
+        """Start or stop Xfce inside one desktop-capable container."""
+        if sandbox._desktop_host_port is None or sandbox.image != DEFAULT_DESKTOP_IMAGE:
+            if enabled:
+                raise BackendError(
+                    "This existing computer was created from a headless or custom "
+                    "image and cannot start Xfce in place. Its data was left "
+                    "untouched; use factory_reset_computer only if replacing it "
+                    "is intentional."
+                )
+            sandbox._desktop_environment = False
+            return sandbox
+
+        desired = str(enabled).lower()
+        script = (
+            "install -d -o computer -g computer "
+            f"$(dirname {DESKTOP_MODE_FILE}); "
+            f"printf '%s\\n' {desired} > {DESKTOP_MODE_FILE}; "
+            f"chown computer:computer {DESKTOP_MODE_FILE}"
+        )
+        await self._run_docker(
+            "exec",
+            "-u",
+            "0",
+            sandbox._container_id,
+            "sh",
+            "-c",
+            script,
+            timeout=10,
+        )
+
+        # The supervisor checks the marker five times per second. Wait for the
+        # actual session state so MCP callers never receive a fictional mode.
+        state_check = (
+            self._desktop_ready_check()
+            if enabled
+            else (
+                "! ps -C xfce4-session -o stat= 2>/dev/null | grep -qv '^[[:space:]]*Z'"
+            )
+        )
+        for _ in range(75):
+            returncode, _, _ = await self._run_docker(
+                "exec",
+                sandbox._container_id,
+                "sh",
+                "-c",
+                state_check,
+                check=False,
+                timeout=5,
+            )
+            if returncode == 0:
+                sandbox._desktop_environment = enabled
+                return sandbox
+            await asyncio.sleep(0.2)
+        raise BackendError(
+            f"Xfce did not {'start' if enabled else 'stop'} within 15 seconds. "
+            "The computer itself is still running and was not replaced."
         )
 
     async def attach_sandbox(self, computer_id: str) -> "DockerSandbox | None":
@@ -409,6 +848,16 @@ class DockerBackend(Backend):
                 )
         sandbox = self._sandbox_from_inspect(data)
         await sandbox._verify_readiness()
+        await self._read_desktop_mode(sandbox)
+        if sandbox.desktop_environment != self._config.desktop_environment:
+            await self._set_desktop_mode(
+                sandbox,
+                self._config.desktop_environment,
+            )
+        await self._set_network_access_on_sandbox(
+            sandbox,
+            self._config.network_enabled,
+        )
         return sandbox
 
     async def list_computers(self) -> list[ComputerInfo]:
@@ -480,6 +929,7 @@ class DockerBackend(Backend):
             raise BackendError(f"Computer '{computer_id}' disappeared after restart.")
         sandbox = self._sandbox_from_inspect(refreshed)
         await sandbox._verify_readiness()
+        await self._read_desktop_mode(sandbox)
         return sandbox
 
     async def delete_computer(self, computer_id: str) -> bool:
@@ -500,11 +950,166 @@ class DockerBackend(Backend):
         labels = config.get("Labels", {})
         labels = cast("dict[str, object]", labels) if isinstance(labels, dict) else {}
         temporary = str(labels.get(TEMPORARY_LABEL, "true")).lower() == "true"
+        current = self._sandbox_from_inspect(data)
+        await self._read_desktop_mode(current)
         await self.delete_computer(computer_id)
         return await self._create_sandbox(
             computer_id=computer_id,
             temporary=temporary,
+            desktop_environment=current.desktop_environment,
+            network_access=current.network_access,
+            image=current.image,
         )
+
+    async def _set_desktop_firewall(
+        self,
+        sandbox: "DockerSandbox",
+        enabled: bool,
+    ) -> None:
+        """Apply the desktop image's outbound-only firewall."""
+        if enabled:
+            script = (
+                "command -v iptables >/dev/null 2>&1 || exit 0; "
+                "iptables -D OUTPUT -j MCP_NO_NETWORK 2>/dev/null || true; "
+                "iptables -F MCP_NO_NETWORK 2>/dev/null || true; "
+                "iptables -X MCP_NO_NETWORK 2>/dev/null || true; "
+                "rm -f /run/mcp-network-disabled"
+            )
+        else:
+            script = (
+                "command -v iptables >/dev/null 2>&1 || { "
+                "echo 'desktop image has no iptables support' >&2; exit 45; }; "
+                "iptables -N MCP_NO_NETWORK 2>/dev/null || true; "
+                "iptables -F MCP_NO_NETWORK; "
+                "iptables -A MCP_NO_NETWORK -o lo -j ACCEPT; "
+                "iptables -A MCP_NO_NETWORK -m conntrack "
+                "--ctstate ESTABLISHED,RELATED -j ACCEPT; "
+                "iptables -A MCP_NO_NETWORK -j REJECT; "
+                "iptables -C OUTPUT -j MCP_NO_NETWORK 2>/dev/null || "
+                "iptables -I OUTPUT 1 -j MCP_NO_NETWORK; "
+                "touch /run/mcp-network-disabled"
+            )
+        try:
+            await self._run_docker(
+                "exec",
+                "-u",
+                "0",
+                sandbox._container_id,
+                "sh",
+                "-c",
+                script,
+                timeout=15,
+            )
+        except BackendError as error:
+            raise BackendError(
+                "Could not change desktop network access. Rebuild the bundled "
+                f"desktop image and retry. Docker reported: {error}"
+            )
+
+    async def _set_headless_network(
+        self,
+        sandbox: "DockerSandbox",
+        enabled: bool,
+    ) -> None:
+        """Attach a headless computer to bridge or Docker's none network."""
+        data = await self._inspect_computer(sandbox.computer_id)
+        if data is None:
+            raise BackendError(f"Computer '{sandbox.computer_id}' was not found.")
+        network_data = data.get("NetworkSettings", {})
+        network_data = (
+            cast("dict[str, object]", network_data)
+            if isinstance(network_data, dict)
+            else {}
+        )
+        raw_networks = network_data.get("Networks", {})
+        networks = (
+            list(cast("dict[str, object]", raw_networks))
+            if isinstance(raw_networks, dict)
+            else []
+        )
+        if not networks:
+            # A real Docker inspect always includes a network entry. Keeping an
+            # empty synthetic inspect unchanged makes provider test doubles and
+            # third-party Docker-compatible engines safe to attach.
+            return
+        container_id = sandbox._container_id
+        if enabled:
+            if any(name != "none" for name in networks):
+                return
+            if "none" in networks:
+                await self._run_docker("network", "disconnect", "none", container_id)
+            try:
+                await self._run_docker("network", "connect", "bridge", container_id)
+            except Exception:
+                await self._run_docker(
+                    "network", "connect", "none", container_id, check=False
+                )
+                raise
+            return
+
+        if networks == ["none"]:
+            return
+        detached: list[str] = []
+        try:
+            for network in networks:
+                if network == "none":
+                    continue
+                await self._run_docker("network", "disconnect", network, container_id)
+                detached.append(network)
+            await self._run_docker("network", "connect", "none", container_id)
+        except Exception:
+            for network in detached:
+                await self._run_docker(
+                    "network", "connect", network, container_id, check=False
+                )
+            raise
+
+    async def _set_network_access_on_sandbox(
+        self,
+        sandbox: "DockerSandbox",
+        enabled: bool,
+    ) -> "DockerSandbox":
+        if sandbox._desktop_host_port is not None:
+            await self._set_desktop_firewall(sandbox, enabled)
+        else:
+            await self._set_headless_network(sandbox, enabled)
+        sandbox._network_access = enabled
+        return sandbox
+
+    async def set_network_access(
+        self,
+        computer_id: str,
+        enabled: bool,
+    ) -> "DockerSandbox | None":
+        """Really enable or isolate outbound traffic for a live computer."""
+        data = await self._inspect_computer(computer_id)
+        if data is None:
+            return None
+        sandbox = self._sandbox_from_inspect(data)
+        await sandbox._verify_readiness()
+        await self._read_desktop_mode(sandbox)
+        return await self._set_network_access_on_sandbox(sandbox, enabled)
+
+    async def switch_desktop_environment(
+        self,
+        computer_id: str,
+        enabled: bool,
+        *,
+        network_access: bool | None = None,
+    ) -> "DockerSandbox | None":
+        """Start or stop Xfce without replacing the Docker computer."""
+        data = await self._inspect_computer(computer_id)
+        if data is None:
+            return None
+        current = self._sandbox_from_inspect(data)
+        await current._verify_readiness()
+        await self._read_desktop_mode(current)
+        network_access = (
+            current.network_access if network_access is None else network_access
+        )
+        if current.desktop_environment != enabled:
+            await self._set_desktop_mode(current, enabled)
+        return await self._set_network_access_on_sandbox(current, network_access)
 
     def tool_instructions(self) -> str | None:
         """Return tool description for Docker backend.
@@ -512,14 +1117,14 @@ class DockerBackend(Backend):
         Returns None if using a custom image (baked-in description only
         applies to default Debian image).
         """
-        if self._config.image != DEFAULT_IMAGE:
+        if self._config.image not in {DEFAULT_IMAGE, DEFAULT_DESKTOP_IMAGE}:
             return None
 
         shell_name = self._config.shell.rsplit("/", 1)[-1]  # basename
         timeout = self._config.default_timeout
 
         return (
-            f"Execute a shell command in an isolated Debian Linux sandbox. "
+            f"Execute a shell command in one persistent Debian Docker computer. "
             f"Commands run in {shell_name}. Each call is independent — "
             f"no state (shell variables, working directory) persists between calls (however filesystem does persist). Use the working_directory "
             f"parameter or chain commands with && to control execution context. "
@@ -546,6 +1151,10 @@ class DockerSandbox(Sandbox):
         self._computer_id = state.computer_id or state.container_id[:12]
         self._temporary = state.temporary
         self._image = state.image
+        self._desktop_environment = state.desktop_environment
+        self._network_access = state.network_access
+        self._workspace_directory = state.workspace_directory
+        self._desktop_host_port = state.desktop_host_port
         self._stopped = False
         self._stop_requested = False
         self._exec_lock = asyncio.Lock()
@@ -572,6 +1181,24 @@ class DockerSandbox(Sandbox):
     def temporary(self) -> bool:
         """Return the provider-side cleanup mode recorded in Docker labels."""
         return self._temporary
+
+    @property
+    def desktop_url(self) -> str | None:
+        if not self._desktop_environment or self._desktop_host_port is None:
+            return None
+        return f"ws://127.0.0.1:{self._desktop_host_port}/websockify"
+
+    @property
+    def desktop_environment(self) -> bool:
+        return self._desktop_environment
+
+    @property
+    def network_access(self) -> bool:
+        return self._network_access
+
+    @property
+    def image(self) -> str | None:
+        return self._image
 
     async def _run_docker(
         self,

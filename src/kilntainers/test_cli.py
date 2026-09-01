@@ -1,7 +1,5 @@
 """Tests for CLI argument parsing, config construction, and validation."""
 
-import subprocess
-import sys
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +18,13 @@ from kilntainers.cli import (
 from kilntainers.config import ServerConfig
 from kilntainers.errors import BackendError
 
+
+@pytest.fixture(autouse=True)
+def configured_computer_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLI startup requires its single computer identity from the environment."""
+    monkeypatch.setenv("COMPUTER_ID", "test-computer")
+
+
 # ================
 # Parser Tests
 # ================
@@ -30,7 +35,6 @@ def test_parser_defaults():
     parser = build_parser()
     args = parser.parse_args([])
 
-    assert args.backend == "docker"
     assert args.transport == "stdio"
     assert args.host is _UNSET
     assert args.port is _UNSET
@@ -40,7 +44,7 @@ def test_parser_defaults():
     assert args.tool_instruction_override is None
     assert args.extended_tool_instruction is None
     assert args.engine == "docker"
-    assert args.image == "debian:bookworm-slim"
+    assert args.image == "mcp-virtual-computer-desktop:bookworm"
     assert args.shell == "/bin/bash"
     assert args.network is True
     assert args.cpu is None
@@ -165,7 +169,7 @@ def test_parser_invalid_types():
 
 def test_build_configs_default_args(monkeypatch):
     """Test build_configs with default arguments."""
-    monkeypatch.delenv("ENABLE_LIFECYCLE_TOOLS", raising=False)
+    monkeypatch.delenv("DESKTOP_ENVIRONMENT", raising=False)
     parser = build_parser()
     args = parser.parse_args([])
 
@@ -183,11 +187,12 @@ def test_build_configs_default_args(monkeypatch):
     assert server_config.session_timeout == 300
     assert server_config.tool_instruction_override is None
     assert server_config.extended_tool_instruction is None
-    assert server_config.enable_lifecycle_tools is False
+    assert server_config.computer_id == "test-computer"
+    assert server_config.desktop_environment is False
 
     # Docker config defaults
     assert docker_config.engine == "docker"
-    assert docker_config.image == "debian:bookworm-slim"
+    assert docker_config.image == "mcp-virtual-computer-desktop:bookworm"
     assert docker_config.shell == "/bin/bash"
     assert docker_config.network_enabled is True
     assert docker_config.cpu is None
@@ -263,28 +268,54 @@ def test_build_configs_timeout_in_both_configs():
     assert docker_config.default_timeout == 300
 
 
-@pytest.mark.parametrize("value", ["true", "TRUE", " True "])
-def test_build_configs_enables_lifecycle_tools_from_environment(
-    monkeypatch, value: str
-):
-    monkeypatch.setenv("ENABLE_LIFECYCLE_TOOLS", value)
+@pytest.mark.parametrize("value", ["true", "TRUE", " True ", "1", "yes", "on"])
+def test_build_configs_enables_desktop_from_environment(monkeypatch, value: str):
+    monkeypatch.setenv("DESKTOP_ENVIRONMENT", value)
     parser = build_parser()
 
     server_config, _backend_config = build_configs(parser.parse_args([]))
 
-    assert server_config.enable_lifecycle_tools is True
+    assert server_config.desktop_environment is True
 
 
-@pytest.mark.parametrize("value", ["false", "1", "yes", "invalid", ""])
-def test_build_configs_disables_lifecycle_tools_unless_explicitly_true(
-    monkeypatch, value: str
-):
-    monkeypatch.setenv("ENABLE_LIFECYCLE_TOOLS", value)
+@pytest.mark.parametrize("value", ["false", "0", "no", "off"])
+def test_build_configs_disables_desktop_from_environment(monkeypatch, value: str):
+    monkeypatch.setenv("DESKTOP_ENVIRONMENT", value)
     parser = build_parser()
 
     server_config, _backend_config = build_configs(parser.parse_args([]))
 
-    assert server_config.enable_lifecycle_tools is False
+    assert server_config.desktop_environment is False
+
+
+def test_build_configs_rejects_invalid_desktop_environment(monkeypatch) -> None:
+    monkeypatch.setenv("DESKTOP_ENVIRONMENT", "sometimes")
+    with pytest.raises(ValueError, match="DESKTOP_ENVIRONMENT"):
+        build_configs(build_parser().parse_args([]))
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", "off"])
+def test_build_configs_disables_network_from_environment(
+    monkeypatch, value: str
+) -> None:
+    monkeypatch.setenv("NETWORK_ACCESS", value)
+    parser = build_parser()
+
+    server_config, backend_config = build_configs(parser.parse_args([]))
+
+    assert server_config.network_access is False
+    assert cast(DockerBackendConfig, backend_config).network_enabled is False
+
+
+def test_build_configs_network_environment_overrides_cli(monkeypatch) -> None:
+    monkeypatch.setenv("NETWORK_ACCESS", "true")
+
+    server_config, backend_config = build_configs(
+        build_parser().parse_args(["--no-network"])
+    )
+
+    assert server_config.network_access is True
+    assert cast(DockerBackendConfig, backend_config).network_enabled is True
 
 
 def test_build_configs_docker_run_flags_not_provided():
@@ -528,7 +559,7 @@ def test_startup_error_exits_with_code_1(capsys):
     assert exc_info.value.code == 1
 
     captured = capsys.readouterr()
-    assert "kilntainers: error: test error message" in captured.err
+    assert "mcp-virtual-computer: error: test error message" in captured.err
     assert captured.out == ""
 
 
@@ -657,7 +688,7 @@ def test_help_output_structure():
     assert "docker backend options" in help_text.lower()
 
     # Check for key arguments
-    assert "--backend" in help_text
+    assert "--backend" not in help_text
     assert "--transport" in help_text
     assert "--timeout" in help_text
     assert "--engine" in help_text
@@ -665,18 +696,9 @@ def test_help_output_structure():
     assert "--docker-run-flag" in help_text
 
 
-def test_loading_modal_backend_preserves_event_loop_policy_in_fresh_process():
-    """Loading Modal's backend class must not import its policy-changing SDK."""
-    script = """
-import asyncio
-from kilntainers.backends import get_backend_class
+def test_only_docker_backend_is_exposed():
+    from kilntainers.backends import get_available_backend_names, get_backend_class
 
-policy_before = type(asyncio.get_event_loop_policy())
-get_backend_class("modal")
-policy_after = type(asyncio.get_event_loop_policy())
-raise SystemExit(0 if policy_after is policy_before else 1)
-"""
-
-    result = subprocess.run([sys.executable, "-c", script], check=False)
-
-    assert result.returncode == 0
+    assert get_available_backend_names() == ["docker"]
+    with pytest.raises(KeyError, match="Available backends: docker"):
+        get_backend_class("modal")

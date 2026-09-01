@@ -97,7 +97,7 @@ class TestHTTPServerCreation:
         mcp = create_server(backend, config)
 
         assert mcp is not None
-        assert mcp.name == "Kilntainers"
+        assert mcp.name == "MCP Virtual Computer"
 
     def test_create_server_with_stdio_config(self):
         """create_server works with stdio transport configuration."""
@@ -109,7 +109,7 @@ class TestHTTPServerCreation:
         mcp = create_server(backend, config)
 
         assert mcp is not None
-        assert mcp.name == "Kilntainers"
+        assert mcp.name == "MCP Virtual Computer"
 
 
 class TestHTTPSessionIsolation:

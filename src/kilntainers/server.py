@@ -1,19 +1,20 @@
 """MCP server implementation."""
 
 import asyncio
+import base64
 import json
 import os
 import signal
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncContextManager
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import Field
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 
 from kilntainers.backends.base import Backend, ExecRequest, Sandbox
 from kilntainers.computers import ComputerRegistry, random_computer_id
@@ -24,7 +25,27 @@ from kilntainers.dashboard import (
     DASHBOARD_URI,
     dashboard_html,
 )
+from kilntainers.desktop import animate_file_operation
+from kilntainers.desktop_control import (
+    SCREEN_ACCESSIBILITY_URI,
+    SCREEN_IMAGE_URI,
+    DesktopControlError,
+    accessibility_snapshot,
+    capture_screen,
+    desktop_action,
+    visible_terminal_execute,
+)
 from kilntainers.errors import BackendError, SandboxDiedError
+from kilntainers.file_tools import (
+    FileToolError,
+    edit_text_file,
+    read_text_file,
+    write_text_file,
+)
+from kilntainers.file_tools import (
+    list_directory as list_text_directory,
+)
+from kilntainers.windows_docker import DockerRuntimeProgress
 
 # Constants
 STDIN_LIMIT = 2 * 1024 * 1024  # 2 MiB (D32)
@@ -48,6 +69,7 @@ class SessionContext:
         transport: str,
         death_callback: Callable[[], None] | None = None,
         registry: ComputerRegistry | None = None,
+        computer_id: str = "virtual-computer",
     ) -> None:
         """Initialize the session context.
 
@@ -60,11 +82,13 @@ class SessionContext:
         self._registry = registry or ComputerRegistry(backend)
         self._transport = transport
         self._death_callback = death_callback
+        self._configured_computer_id = computer_id
         self._default_computer_id: str | None = None
         self._current_computer_id: str | None = None
         self._owned_computers: dict[str, bool] = {}
         self._death_tasks: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
+        self.last_surface = "desktop"
 
     @property
     def sandbox(self) -> Sandbox | None:
@@ -94,7 +118,8 @@ class SessionContext:
         self,
         computer_id: str | None = None,
         *,
-        temporary: bool = True,
+        temporary: bool = False,
+        progress: Callable[[DockerRuntimeProgress], Awaitable[None]] | None = None,
     ) -> Sandbox:
         """Get the sandbox, creating it lazily on first call.
 
@@ -109,10 +134,15 @@ class SessionContext:
                 will retry creation.
         """
         async with self._lock:
-            target_id = computer_id
-            if target_id is None and self._default_computer_id is not None:
-                target_id = self._default_computer_id
-                temporary = self._owned_computers[target_id]
+            await self._backend.ensure_runtime(progress)
+            if computer_id is not None and computer_id != self._configured_computer_id:
+                raise BackendError(
+                    "This server owns one computer selected by COMPUTER_ID; "
+                    "tool calls cannot select another computer."
+                )
+            if temporary:
+                raise BackendError("Temporary computers are disabled.")
+            target_id = self._configured_computer_id
 
             if target_id is not None and target_id in self._owned_computers:
                 existing = await self._registry.get_owned(target_id)
@@ -132,8 +162,7 @@ class SessionContext:
             )
             self._owned_computers[assigned_id] = sandbox.temporary
             self._current_computer_id = assigned_id
-            if computer_id is None and self._default_computer_id is None:
-                self._default_computer_id = assigned_id
+            self._default_computer_id = assigned_id
             self._start_death_monitor(assigned_id, sandbox)
             return sandbox
 
@@ -181,6 +210,31 @@ class SessionContext:
         """Factory-reset through the registry and refresh monitoring."""
         await self._cancel_death_monitor(computer_id)
         sandbox = await self._registry.factory_reset(computer_id)
+        if computer_id in self._owned_computers:
+            self._start_death_monitor(computer_id, sandbox)
+        self._current_computer_id = computer_id
+        return sandbox
+
+    async def set_network_access(self, computer_id: str, enabled: bool) -> Sandbox:
+        """Change network access and refresh the session's death monitor."""
+        await self._cancel_death_monitor(computer_id)
+        sandbox = await self._registry.set_network_access(computer_id, enabled)
+        if computer_id in self._owned_computers:
+            self._start_death_monitor(computer_id, sandbox)
+        self._current_computer_id = computer_id
+        return sandbox
+
+    async def switch_desktop_environment(
+        self,
+        computer_id: str,
+        enabled: bool,
+    ) -> Sandbox:
+        """Switch real/virtual desktop mode and refresh death monitoring."""
+        await self._cancel_death_monitor(computer_id)
+        sandbox = await self._registry.switch_desktop_environment(
+            computer_id,
+            enabled,
+        )
         if computer_id in self._owned_computers:
             self._start_death_monitor(computer_id, sandbox)
         self._current_computer_id = computer_id
@@ -298,6 +352,7 @@ def create_lifespan(
     *,
     death_callback: Callable[[], None] | None = None,
     registry: ComputerRegistry | None = None,
+    computer_id: str = "virtual-computer",
 ) -> Callable[[FastMCP], AsyncContextManager[SessionContext]]:
     """Create a lifespan context manager for the given transport.
 
@@ -324,6 +379,7 @@ def create_lifespan(
             transport=transport,
             death_callback=death_callback,
             registry=registry,
+            computer_id=computer_id,
         )
         try:
             yield ctx
@@ -401,8 +457,6 @@ def _create_handler(config: ServerConfig) -> Callable[..., Any]:
         stdin: str | None = None,
         working_directory: str | None = None,
         timeout: int | None = None,
-        computer_id: str | None = None,
-        temporary: bool = True,
         ctx: Context[ServerSession, SessionContext] | None = None,
     ) -> CallToolResult:
         """Handle a terminal_execute tool call.
@@ -418,6 +472,17 @@ def _create_handler(config: ServerConfig) -> Callable[..., Any]:
         Returns:
             A CallToolResult with the execution result or error.
         """
+        def error_result(message: str) -> CallToolResult:
+            return _result(
+                {
+                    "operation": "terminal_execute",
+                    "computer_id": config.computer_id,
+                    "desktop_environment": config.desktop_environment,
+                    "error": message,
+                },
+                is_error=True,
+            )
+
         # --- Input sanitization ---
         if args is not None and len(args) == 0:
             args = None
@@ -431,58 +496,69 @@ def _create_handler(config: ServerConfig) -> Callable[..., Any]:
         # --- Input validation ---
         error = _validate_inputs(command, args, stdin, working_directory, timeout)
         if error is not None:
-            return CallToolResult(
-                content=[TextContent(type="text", text=error)],
-                isError=True,
-            )
+            return error_result(error)
 
         # --- Get sandbox from context ---
         # ctx should always be provided by FastMCP, but handle None for safety
         if ctx is None:
-            return CallToolResult(
-                content=[
-                    TextContent(type="text", text="Internal error: no context provided")
-                ],
-                isError=True,
-            )
+            return error_result("Internal error: no context provided")
 
         session_context = ctx.request_context.lifespan_context
+
+        async def report_runtime(update: DockerRuntimeProgress) -> None:
+            await ctx.report_progress(
+                update.progress,
+                total=update.total,
+                message=update.message,
+            )
 
         # --- Lazy sandbox creation ---
         try:
             sandbox = await session_context.get_or_create_sandbox(
-                computer_id=computer_id,
-                temporary=temporary,
+                computer_id=config.computer_id,
+                temporary=False,
+                progress=report_runtime,
             )
         except BackendError as e:
-            return CallToolResult(
-                content=[TextContent(type="text", text=str(e))],
-                isError=True,
-            )
+            return error_result(str(e))
 
         # --- Construct ExecRequest ---
-        request = ExecRequest(
-            command=command,
-            args=args,
-            stdin=stdin,
-            working_directory=working_directory,
-            timeout=timeout if timeout is not None else config.default_timeout,
-            output_limit=config.output_limit,
-        )
-
         # --- Execute ---
         try:
-            result = await sandbox.exec(request)
-        except SandboxDiedError as e:
-            return CallToolResult(
-                content=[TextContent(type="text", text=str(e))],
-                isError=True,
-            )
+            resolved_timeout = timeout if timeout is not None else config.default_timeout
+            if sandbox.desktop_environment and sandbox.desktop_url is not None:
+                result = await visible_terminal_execute(
+                    sandbox,
+                    command=command,
+                    args=args,
+                    stdin=stdin,
+                    working_directory=(
+                        working_directory or config.workspace_directory
+                    ),
+                    timeout=resolved_timeout,
+                    output_limit=config.output_limit,
+                )
+            else:
+                request = ExecRequest(
+                    command=command,
+                    args=args,
+                    stdin=stdin,
+                    working_directory=working_directory,
+                    timeout=resolved_timeout,
+                    output_limit=config.output_limit,
+                )
+                result = await sandbox.exec(request)
+        except (DesktopControlError, SandboxDiedError) as e:
+            return error_result(str(e))
+        session_context.last_surface = "terminal"
 
         # --- Format response ---
         response = {
             "computer_id": session_context.current_computer_id,
-            "temporary": sandbox.temporary,
+            "operation": "terminal_execute",
+            "desktop_environment": sandbox.desktop_environment,
+            "network_access": sandbox.network_access,
+            "desktop_url": sandbox.desktop_url,
             "stdout": result.stdout,
             "stderr": result.stderr,
             "exit_code": result.exit_code,
@@ -500,10 +576,18 @@ def _create_handler(config: ServerConfig) -> Callable[..., Any]:
 
 
 def _computer_ui_meta(*, launcher: bool = False) -> dict[str, Any]:
-    ui: dict[str, Any] = {"visibility": ["model", "app"]}
-    if launcher:
-        ui["resourceUri"] = DASHBOARD_URI
-    return {"ui": ui}
+    return {
+        "ui": {
+            "visibility": ["model", "app"],
+            "resourceUri": DASHBOARD_URI,
+        },
+        "openai/outputTemplate": DASHBOARD_URI,
+    }
+
+
+def _app_only_meta() -> dict[str, Any]:
+    """Hide manual UI plumbing from the model while exposing it to the App."""
+    return {"ui": {"visibility": ["app"]}}
 
 
 def _register_computer_tools(mcp: FastMCP, config: ServerConfig) -> None:
@@ -762,30 +846,87 @@ def create_server(
 
     # Create lifespan that captures the backend and transport
     registry = ComputerRegistry(backend)
-    lifespan = create_lifespan(backend, config.transport, registry=registry)
+    lifespan = create_lifespan(
+        backend,
+        config.transport,
+        registry=registry,
+        computer_id=config.computer_id,
+    )
 
     # Create server
     mcp = FastMCP(
-        name="Kilntainers",
+        name="MCP Virtual Computer",
         lifespan=lifespan,
         host=config.host,
         port=config.port,
     )
 
+    activity_revision = 0
+    activity_events: list[dict[str, Any]] = []
+
+    def publish_activity(
+        phase: str,
+        operation: str,
+        arguments: dict[str, Any],
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Expose genuine MCP tool lifecycle events to the local dashboard."""
+        nonlocal activity_revision
+        activity_revision += 1
+        activity_events.append(
+            {
+                "revision": activity_revision,
+                "phase": phase,
+                "operation": operation,
+                "arguments": arguments,
+                "payload": payload,
+            }
+        )
+        del activity_events[:-64]
+
     @mcp.custom_route("/healthz", methods=["GET"], include_in_schema=False)
     async def healthz(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
+    @mcp.custom_route("/activity", methods=["GET"], include_in_schema=False)
+    async def activity(request: Request) -> JSONResponse:
+        try:
+            after = max(0, int(request.query_params.get("after", "0")))
+        except ValueError:
+            after = 0
+        return JSONResponse(
+            {
+                "revision": activity_revision,
+                "events": [event for event in activity_events if event["revision"] > after],
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
     @mcp.custom_route("/", methods=["GET"], include_in_schema=False)
     async def service_info(request: Request) -> JSONResponse:
+        live_sandbox = registry.peek(config.computer_id)
         payload = {
-            "name": "mcp-sandbox-computer-vm-for-ai",
+            "name": "mcp-virtual-computer",
             "mcp_endpoint": "/mcp",
             "health": "/healthz",
+            "computer_id": config.computer_id,
+            "desktop_environment": (
+                live_sandbox.desktop_environment
+                if live_sandbox is not None
+                else config.desktop_environment
+            ),
+            "network_access": (
+                live_sandbox.network_access
+                if live_sandbox is not None
+                else config.network_access
+            ),
+            "app_resource": DASHBOARD_URI,
         }
-        if config.enable_lifecycle_tools:
-            payload["dashboard_resource"] = DASHBOARD_URI
         return JSONResponse(payload)
+
+    @mcp.custom_route("/dashboard.html", methods=["GET"], include_in_schema=False)
+    async def dashboard_page(request: Request) -> HTMLResponse:
+        return HTMLResponse(dashboard_html())
 
     handler = _create_handler(config)
 
@@ -811,36 +952,31 @@ def create_server(
             int,  # noqa: RUF013
             Field(description="Timeout in seconds (defaults to server config)."),
         ] = None,  # type: ignore
-        computer_id: Annotated[
-            str,  # noqa: RUF013
-            Field(
-                description=(
-                    "Stable computer slug. Omit to create and select a readable "
-                    "random ID for this MCP session."
-                )
-            ),
-        ] = None,  # type: ignore
-        temporary: Annotated[
-            bool,
-            Field(
-                description=(
-                    "Remove the computer when its MCP session shuts down. Set "
-                    "false to keep it provider-side and reconnect by computer_id."
-                )
-            ),
-        ] = True,
         ctx: Context[ServerSession, SessionContext] | None = None,
     ) -> CallToolResult:
-        return await handler(
+        arguments = {
+            key: value
+            for key, value in {
+                "command": command,
+                "args": args,
+                "stdin": stdin,
+                "working_directory": working_directory,
+                "timeout": timeout,
+            }.items()
+            if value is not None
+        }
+        publish_activity("request", "terminal_execute", arguments)
+        result = await handler(
             command=command,
             args=args,
             stdin=stdin,
             working_directory=working_directory,
             timeout=timeout,
-            computer_id=computer_id,
-            temporary=temporary,
             ctx=ctx,
         )
+        payload = dict(result.structuredContent or {})
+        publish_activity("result", "terminal_execute", arguments, payload)
+        return result
 
     mcp.add_tool(
         terminal_execute,
@@ -849,8 +985,776 @@ def create_server(
         meta=_computer_ui_meta(),
     )
 
-    if config.enable_lifecycle_tools:
-        _register_computer_tools(mcp, config)
-        _enable_mcp_apps_capability(mcp)
+    async def computer_ui(
+        ctx: Context[ServerSession, SessionContext] | None = None,
+    ) -> CallToolResult:
+        """Open the Three.js virtual computer."""
+        session = _session_from_context(ctx)
+        if session is None:
+            return _result({"error": "Internal error: no context provided"}, is_error=True)
+        backend.start_runtime_preparation()
+        runtime = backend.runtime_status()
+        if runtime.get("runtime_state") != "ready":
+            return _result(
+                {
+                    "operation": "idle",
+                    "computer_id": config.computer_id,
+                    "computer_attached": False,
+                    "desktop_environment": config.desktop_environment,
+                    "network_access": config.network_access,
+                    "workspace_directory": config.workspace_directory,
+                    **runtime,
+                }
+            )
+        try:
+            sandbox = await session.get_or_create_sandbox()
+        except BackendError as error:
+            return _result({"error": str(error)}, is_error=True)
+        return _result(
+            {
+                "operation": "idle",
+                "computer_id": config.computer_id,
+                "computer_attached": True,
+                "desktop_environment": sandbox.desktop_environment,
+                "network_access": sandbox.network_access,
+                "desktop_url": sandbox.desktop_url,
+                "workspace_directory": config.workspace_directory,
+                **backend.runtime_status(),
+            }
+        )
+
+    mcp.add_tool(
+        computer_ui,
+        name="computer_ui",
+        title="Open Virtual Computer",
+        description="Open the interactive Three.js laptop and its computer screen.",
+        meta=_computer_ui_meta(launcher=True),
+    )
+
+    async def runtime_status() -> CallToolResult:
+        """Return lazy host-runtime setup state for the computer App."""
+        sandbox = registry.peek(config.computer_id)
+        return _result(
+            {
+                "operation": "idle",
+                "computer_id": config.computer_id,
+                "computer_attached": sandbox is not None,
+                "desktop_environment": (
+                    sandbox.desktop_environment
+                    if sandbox is not None
+                    else config.desktop_environment
+                ),
+                "network_access": (
+                    sandbox.network_access
+                    if sandbox is not None
+                    else config.network_access
+                ),
+                "desktop_url": sandbox.desktop_url if sandbox is not None else None,
+                "workspace_directory": config.workspace_directory,
+                **backend.runtime_status(),
+            }
+        )
+
+    mcp.add_tool(
+        runtime_status,
+        name="runtime_status",
+        description="Read genuine lazy container-runtime setup progress.",
+        meta=_app_only_meta(),
+    )
+
+    runtime_switch_lock = asyncio.Lock()
+    desktop_capability_sync: Callable[[bool], None] | None = None
+
+    async def set_network_access(
+        enabled: Annotated[
+            bool,
+            Field(description="Whether the Docker computer may access the network."),
+        ],
+        ctx: Context[ServerSession, SessionContext] | None = None,
+    ) -> CallToolResult:
+        """Plug in or unplug the virtual computer's real network connection."""
+        session = _session_from_context(ctx)
+        if session is None:
+            return _result({"error": "Internal error: no context provided"}, is_error=True)
+        try:
+            async with runtime_switch_lock:
+                await session.get_or_create_sandbox()
+                sandbox = await session.set_network_access(config.computer_id, enabled)
+            return _result(
+                {
+                    "operation": "idle",
+                    "computer_id": config.computer_id,
+                    "desktop_environment": sandbox.desktop_environment,
+                    "desktop_url": sandbox.desktop_url,
+                    "network_access": sandbox.network_access,
+                    "workspace_directory": config.workspace_directory,
+                }
+            )
+        except (BackendError, SandboxDiedError) as error:
+            return _result({"error": str(error)}, is_error=True)
+
+    async def set_desktop_environment(
+        enabled: Annotated[
+            bool,
+            Field(description="Use a real Xfce desktop instead of the virtual desktop."),
+        ],
+        ctx: Context[ServerSession, SessionContext] | None = None,
+    ) -> CallToolResult:
+        """Switch the same Docker computer between virtual and real desktops."""
+        session = _session_from_context(ctx)
+        if session is None:
+            return _result({"error": "Internal error: no context provided"}, is_error=True)
+        try:
+            async with runtime_switch_lock:
+                await session.get_or_create_sandbox()
+                sandbox = await session.switch_desktop_environment(
+                    config.computer_id,
+                    enabled,
+                )
+                if desktop_capability_sync is not None:
+                    desktop_capability_sync(sandbox.desktop_environment)
+            if ctx is not None:
+                await ctx.session.send_tool_list_changed()
+                await ctx.session.send_resource_list_changed()
+            return _result(
+                {
+                    "operation": "idle",
+                    "computer_id": config.computer_id,
+                    "desktop_environment": sandbox.desktop_environment,
+                    "desktop_url": sandbox.desktop_url,
+                    "network_access": sandbox.network_access,
+                    "workspace_directory": config.workspace_directory,
+                }
+            )
+        except (BackendError, SandboxDiedError) as error:
+            return _result({"error": str(error)}, is_error=True)
+
+    mcp.add_tool(
+        set_network_access,
+        name="set_network_access",
+        description="Change the running Docker computer's real network access.",
+        meta=_app_only_meta(),
+    )
+    mcp.add_tool(
+        set_desktop_environment,
+        name="set_desktop_environment",
+        description="Switch the running computer between virtual and Xfce desktops.",
+        meta=_app_only_meta(),
+    )
+
+    async def _sandbox_for_file_tool(
+        ctx: Context[ServerSession, SessionContext] | None,
+    ) -> tuple[SessionContext, Sandbox]:
+        session = _session_from_context(ctx)
+        if session is None:
+            raise FileToolError("Internal error: no context provided")
+
+        async def report_runtime(update: DockerRuntimeProgress) -> None:
+            assert ctx is not None
+            await ctx.report_progress(
+                update.progress,
+                total=update.total,
+                message=update.message,
+            )
+
+        return session, await session.get_or_create_sandbox(progress=report_runtime)
+
+    async def list_directory(
+        path: Annotated[
+            str,
+            Field(description="Directory path, absolute or relative to /workspace."),
+        ] = ".",
+        ctx: Context[ServerSession, SessionContext] | None = None,
+    ) -> CallToolResult:
+        """List a real Docker directory for manual Explorer interaction."""
+        try:
+            _session, sandbox = await _sandbox_for_file_tool(ctx)
+            listing = await list_text_directory(
+                sandbox,
+                path,
+                workspace_directory=config.workspace_directory,
+                timeout=config.default_timeout,
+                output_limit=config.output_limit,
+            )
+            return _result(
+                {
+                    "computer_id": config.computer_id,
+                    "workspace_directory": config.workspace_directory,
+                    "path": listing.path,
+                    "entries": [
+                        {
+                            "name": entry.name,
+                            "path": entry.path,
+                            "kind": entry.kind,
+                            "size_bytes": entry.size_bytes,
+                        }
+                        for entry in listing.entries
+                    ],
+                }
+            )
+        except (BackendError, SandboxDiedError) as error:
+            return _result({"error": str(error)}, is_error=True)
+
+    mcp.add_tool(
+        list_directory,
+        name="list_directory",
+        description="List a Docker directory for the interactive virtual Explorer.",
+        meta=_app_only_meta(),
+    )
+
+    def file_payload(
+        *,
+        operation: str,
+        sandbox: Sandbox,
+        path: str,
+        content: str,
+        size_bytes: int,
+        sha256: str,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        return {
+            "operation": operation,
+            "computer_id": config.computer_id,
+            "desktop_environment": sandbox.desktop_environment,
+            "network_access": sandbox.network_access,
+            "desktop_url": sandbox.desktop_url,
+            "workspace_directory": config.workspace_directory,
+            "path": path,
+            "content": content,
+            "size_bytes": size_bytes,
+            "sha256": sha256,
+            **extra,
+        }
+
+    async def read_file(
+        path: Annotated[
+            str,
+            Field(description="UTF-8 text file path, absolute or relative to /workspace."),
+        ],
+        ctx: Context[ServerSession, SessionContext] | None = None,
+    ) -> CallToolResult:
+        """Read a UTF-8 text file while the virtual computer opens and scrolls it."""
+        arguments = {"path": path}
+        publish_activity("request", "read_file", arguments)
+        try:
+            session, sandbox = await _sandbox_for_file_tool(ctx)
+            file = await read_text_file(
+                sandbox,
+                path,
+                workspace_directory=config.workspace_directory,
+                timeout=config.default_timeout,
+                output_limit=config.output_limit,
+                text_limit=config.file_text_limit,
+            )
+            warning = await animate_file_operation(
+                sandbox,
+                operation="read_file",
+                path=file.path,
+                content=None,
+                original_content=None,
+                old_text=None,
+                new_text=None,
+                replace_all=False,
+                terminal_was_last=session.last_surface == "terminal",
+                workspace_directory=config.workspace_directory,
+            )
+            session.last_surface = "file"
+            payload = file_payload(
+                operation="read_file",
+                sandbox=sandbox,
+                path=file.path,
+                content=file.content,
+                size_bytes=file.size_bytes,
+                sha256=file.sha256,
+                visualization_warning=warning,
+            )
+            publish_activity("result", "read_file", arguments, payload)
+            return _result(payload)
+        except (BackendError, SandboxDiedError) as error:
+            payload = {"error": str(error), "operation": "read_file"}
+            publish_activity("result", "read_file", arguments, payload)
+            return _result(payload, is_error=True)
+
+    async def write_file(
+        path: Annotated[
+            str,
+            Field(description="UTF-8 text file path, absolute or relative to /workspace."),
+        ],
+        content: Annotated[str, Field(description="Complete UTF-8 text to save.")],
+        create_parent_directories: Annotated[
+            bool,
+            Field(description="Create missing parent folders before saving."),
+        ] = True,
+        ctx: Context[ServerSession, SessionContext] | None = None,
+    ) -> CallToolResult:
+        """Atomically write a UTF-8 file while the virtual editor types it."""
+        arguments = {
+            "path": path,
+            "content": content,
+            "create_parent_directories": create_parent_directories,
+        }
+        publish_activity("request", "write_file", arguments)
+        try:
+            session, sandbox = await _sandbox_for_file_tool(ctx)
+            original_content: str | None = None
+            if sandbox.desktop_url is not None:
+                try:
+                    original = await read_text_file(
+                        sandbox,
+                        path,
+                        workspace_directory=config.workspace_directory,
+                        timeout=config.default_timeout,
+                        output_limit=config.output_limit,
+                        text_limit=config.file_text_limit,
+                    )
+                    original_content = original.content
+                except FileToolError:
+                    pass
+            file = await write_text_file(
+                sandbox,
+                path,
+                content,
+                workspace_directory=config.workspace_directory,
+                timeout=config.default_timeout,
+                output_limit=config.output_limit,
+                text_limit=config.file_text_limit,
+                create_parent_directories=create_parent_directories,
+            )
+            warning = await animate_file_operation(
+                sandbox,
+                operation="write_file",
+                path=file.path,
+                content=file.content,
+                original_content=original_content,
+                old_text=None,
+                new_text=None,
+                replace_all=False,
+                terminal_was_last=session.last_surface == "terminal",
+                workspace_directory=config.workspace_directory,
+            )
+            session.last_surface = "file"
+            payload = file_payload(
+                operation="write_file",
+                sandbox=sandbox,
+                path=file.path,
+                content=file.content,
+                size_bytes=file.size_bytes,
+                sha256=file.sha256,
+                created_parent_directories=create_parent_directories,
+                visualization_warning=warning,
+            )
+            publish_activity("result", "write_file", arguments, payload)
+            return _result(payload)
+        except (BackendError, SandboxDiedError) as error:
+            payload = {"error": str(error), "operation": "write_file"}
+            publish_activity("result", "write_file", arguments, payload)
+            return _result(payload, is_error=True)
+
+    async def edit_file(
+        path: Annotated[
+            str,
+            Field(description="UTF-8 text file path, absolute or relative to /workspace."),
+        ],
+        old_text: Annotated[
+            str,
+            Field(description="Exact text to select and replace; include context if ambiguous."),
+        ],
+        new_text: Annotated[str, Field(description="Replacement UTF-8 text.")],
+        replace_all: Annotated[
+            bool,
+            Field(description="Replace every exact match instead of requiring one match."),
+        ] = False,
+        ctx: Context[ServerSession, SessionContext] | None = None,
+    ) -> CallToolResult:
+        """Replace exact text while the virtual editor selects and overwrites it."""
+        arguments = {
+            "path": path,
+            "old_text": old_text,
+            "new_text": new_text,
+            "replace_all": replace_all,
+        }
+        publish_activity("request", "edit_file", arguments)
+        try:
+            session, sandbox = await _sandbox_for_file_tool(ctx)
+            file, replacements, original_content = await edit_text_file(
+                sandbox,
+                path,
+                old_text,
+                new_text,
+                replace_all=replace_all,
+                workspace_directory=config.workspace_directory,
+                timeout=config.default_timeout,
+                output_limit=config.output_limit,
+                text_limit=config.file_text_limit,
+            )
+            warning = await animate_file_operation(
+                sandbox,
+                operation="edit_file",
+                path=file.path,
+                content=file.content,
+                original_content=original_content,
+                old_text=old_text,
+                new_text=new_text,
+                replace_all=replace_all,
+                terminal_was_last=session.last_surface == "terminal",
+                workspace_directory=config.workspace_directory,
+            )
+            session.last_surface = "file"
+            payload = file_payload(
+                operation="edit_file",
+                sandbox=sandbox,
+                path=file.path,
+                content=file.content,
+                size_bytes=file.size_bytes,
+                sha256=file.sha256,
+                old_text=old_text,
+                new_text=new_text,
+                replacements=replacements,
+                visualization_warning=warning,
+            )
+            publish_activity("result", "edit_file", arguments, payload)
+            return _result(payload)
+        except (BackendError, SandboxDiedError) as error:
+            payload = {"error": str(error), "operation": "edit_file"}
+            publish_activity("result", "edit_file", arguments, payload)
+            return _result(payload, is_error=True)
+
+    for tool, name, tool_description in (
+        (read_file, "read_file", "Read a UTF-8 text file and show it being opened and scrolled on the virtual computer."),
+        (write_file, "write_file", "Write a UTF-8 text file and show it being typed and saved on the virtual computer."),
+        (edit_file, "edit_file", "Replace exact UTF-8 text and show it being selected, overwritten, and saved."),
+    ):
+        mcp.add_tool(tool, name=name, description=tool_description, meta=_computer_ui_meta())
+
+    # Define desktop capabilities once, then add/remove them when the mug changes
+    # the real runtime mode. This keeps tools/list honest in headless mode.
+    if True:
+
+        async def _live_desktop(
+            ctx: Context[ServerSession, SessionContext] | None,
+        ) -> Sandbox:
+            _session, sandbox = await _sandbox_for_file_tool(ctx)
+            if sandbox.desktop_url is None:
+                raise DesktopControlError(
+                    "The configured computer has no live Xfce desktop."
+                )
+            return sandbox
+
+        async def _resource_desktop() -> Sandbox:
+            _computer_id, sandbox = await registry.acquire(
+                config.computer_id,
+                temporary=False,
+                add_owner=False,
+            )
+            if sandbox.desktop_url is None:
+                raise DesktopControlError(
+                    "The configured computer has no live Xfce desktop."
+                )
+            return sandbox
+
+        @mcp.resource(
+            SCREEN_IMAGE_URI,
+            name="Current Computer Screen",
+            title="Current Computer Screen",
+            description="Current PNG capture of the live Xfce framebuffer.",
+            mime_type="image/png",
+        )
+        async def current_screen_resource() -> bytes:
+            return await capture_screen(await _resource_desktop())
+
+        @mcp.resource(
+            SCREEN_ACCESSIBILITY_URI,
+            name="Current Screen Accessibility Snapshot",
+            title="Current Screen Accessibility Snapshot",
+            description=(
+                "Current AT-SPI element tree with stable references and screen bounds."
+            ),
+            mime_type="application/json",
+        )
+        async def current_accessibility_resource() -> str:
+            snapshot = await accessibility_snapshot(await _resource_desktop())
+            return json.dumps(snapshot, ensure_ascii=False, indent=2)
+
+        async def look_at_screen(
+            include_image: Annotated[
+                bool,
+                Field(description="Include the current PNG framebuffer capture."),
+            ] = True,
+            include_accessibility: Annotated[
+                bool,
+                Field(description="Include the current AT-SPI accessibility snapshot."),
+            ] = True,
+            ctx: Context[ServerSession, SessionContext] | None = None,
+        ) -> CallToolResult:
+            """Look at the live desktop as pixels, accessible elements, or both."""
+            if not include_image and not include_accessibility:
+                return _result(
+                    {"error": "Enable include_image, include_accessibility, or both."},
+                    is_error=True,
+                )
+            try:
+                sandbox = await _live_desktop(ctx)
+                content: list[Any] = []
+                payload: dict[str, Any] = {
+                    "computer_id": config.computer_id,
+                    "screen_image_uri": SCREEN_IMAGE_URI,
+                    "accessibility_uri": SCREEN_ACCESSIBILITY_URI,
+                }
+                if include_accessibility:
+                    snapshot = await accessibility_snapshot(sandbox)
+                    payload["accessibility"] = snapshot
+                    content.append(
+                        TextContent(
+                            type="text",
+                            text=str(snapshot.get("snapshot", "")),
+                        )
+                    )
+                if include_image:
+                    image = await capture_screen(sandbox)
+                    content.append(
+                        ImageContent(
+                            type="image",
+                            data=base64.b64encode(image).decode("ascii"),
+                            mimeType="image/png",
+                        )
+                    )
+                return CallToolResult(
+                    content=content,
+                    isError=False,
+                    structuredContent=payload,
+                )
+            except (BackendError, DesktopControlError, SandboxDiedError) as error:
+                return _result({"error": str(error)}, is_error=True)
+
+        async def _run_desktop_tool(
+            ctx: Context[ServerSession, SessionContext] | None,
+            action: str,
+            payload: dict[str, Any],
+        ) -> CallToolResult:
+            try:
+                sandbox = await _live_desktop(ctx)
+                response = await desktop_action(sandbox, action, payload)
+                return _result(
+                    {
+                        "computer_id": config.computer_id,
+                        "desktop_url": sandbox.desktop_url,
+                        **response,
+                    }
+                )
+            except (BackendError, DesktopControlError, SandboxDiedError) as error:
+                return _result({"error": str(error)}, is_error=True)
+
+        async def click(
+            element: Annotated[
+                str,  # noqa: RUF013
+                Field(description="AT-SPI ref from look_at_screen (for example atspi:8/0/2)."),
+            ] = None,  # type: ignore
+            x: Annotated[int, Field(description="Desktop X coordinate.")] = None,  # type: ignore # noqa: RUF013
+            y: Annotated[int, Field(description="Desktop Y coordinate.")] = None,  # type: ignore # noqa: RUF013
+            button: Annotated[
+                str,
+                Field(description="Mouse button: left, middle, or right."),
+            ] = "left",
+            clicks: Annotated[
+                int,
+                Field(description="Click count from 1 to 3.", ge=1, le=3),
+            ] = 1,
+            ctx: Context[ServerSession, SessionContext] | None = None,
+        ) -> CallToolResult:
+            """Click a live accessibility element or desktop coordinates."""
+            return await _run_desktop_tool(
+                ctx,
+                "click",
+                {"element": element, "x": x, "y": y, "button": button, "clicks": clicks},
+            )
+
+        async def type_on_screen(
+            text: Annotated[str, Field(description="Text to type into the active control.")],
+            element: Annotated[
+                str,  # noqa: RUF013
+                Field(description="Optional AT-SPI ref to focus before typing."),
+            ] = None,  # type: ignore
+            clear: Annotated[
+                bool,
+                Field(description="Select existing content with Ctrl+A before typing."),
+            ] = False,
+            press_enter: Annotated[
+                bool,
+                Field(description="Press Enter after typing."),
+            ] = False,
+            delay_ms: Annotated[
+                int,
+                Field(description="Delay between keystrokes in milliseconds.", ge=0, le=100),
+            ] = 2,
+            ctx: Context[ServerSession, SessionContext] | None = None,
+        ) -> CallToolResult:
+            """Type into the active Xfce control, optionally focusing it first."""
+            return await _run_desktop_tool(
+                ctx,
+                "type",
+                {
+                    "text": text,
+                    "element": element,
+                    "clear": clear,
+                    "press_enter": press_enter,
+                    "delay_ms": delay_ms,
+                },
+            )
+
+        async def scroll(
+            direction: Annotated[
+                str,
+                Field(description="Scroll direction: up, down, left, or right."),
+            ] = "down",
+            amount: Annotated[
+                int,
+                Field(description="Number of wheel steps.", ge=1, le=50),
+            ] = 3,
+            element: Annotated[
+                str,  # noqa: RUF013
+                Field(description="Optional AT-SPI ref to scroll over."),
+            ] = None,  # type: ignore
+            x: Annotated[int, Field(description="Optional desktop X coordinate.")] = None,  # type: ignore # noqa: RUF013
+            y: Annotated[int, Field(description="Optional desktop Y coordinate.")] = None,  # type: ignore # noqa: RUF013
+            ctx: Context[ServerSession, SessionContext] | None = None,
+        ) -> CallToolResult:
+            """Scroll the live desktop over an element, coordinates, or current pointer."""
+            return await _run_desktop_tool(
+                ctx,
+                "scroll",
+                {"direction": direction, "amount": amount, "element": element, "x": x, "y": y},
+            )
+
+        async def list_windows(
+            ctx: Context[ServerSession, SessionContext] | None = None,
+        ) -> CallToolResult:
+            """List live Xfce windows with IDs, geometry, class, title, and state."""
+            return await _run_desktop_tool(ctx, "list_windows", {})
+
+        async def switch_window(
+            window: Annotated[
+                str,
+                Field(description="Window ID, exact title/class, or an unambiguous substring."),
+            ],
+            ctx: Context[ServerSession, SessionContext] | None = None,
+        ) -> CallToolResult:
+            """Activate and raise a live Xfce window."""
+            return await _run_desktop_tool(ctx, "switch_window", {"window": window})
+
+        async def move_window(
+            window: Annotated[str, Field(description="Window ID, title, or class.")],
+            x: Annotated[int, Field(description="New desktop X coordinate.")],
+            y: Annotated[int, Field(description="New desktop Y coordinate.")],
+            width: Annotated[int, Field(description="Optional new width.", ge=1)] = None,  # type: ignore # noqa: RUF013
+            height: Annotated[int, Field(description="Optional new height.", ge=1)] = None,  # type: ignore # noqa: RUF013
+            ctx: Context[ServerSession, SessionContext] | None = None,
+        ) -> CallToolResult:
+            """Move and optionally resize a live Xfce window."""
+            return await _run_desktop_tool(
+                ctx,
+                "move_window",
+                {"window": window, "x": x, "y": y, "width": width, "height": height},
+            )
+
+        async def _window_tool(
+            ctx: Context[ServerSession, SessionContext] | None,
+            action: str,
+            window: str,
+        ) -> CallToolResult:
+            return await _run_desktop_tool(ctx, action, {"window": window})
+
+        async def maximize_window(
+            window: Annotated[str, Field(description="Window ID, title, or class.")],
+            ctx: Context[ServerSession, SessionContext] | None = None,
+        ) -> CallToolResult:
+            """Maximize a live Xfce window."""
+            return await _window_tool(ctx, "maximize_window", window)
+
+        async def restore_window(
+            window: Annotated[str, Field(description="Window ID, title, or class.")],
+            ctx: Context[ServerSession, SessionContext] | None = None,
+        ) -> CallToolResult:
+            """Restore and activate a minimized or maximized Xfce window."""
+            return await _window_tool(ctx, "restore_window", window)
+
+        async def minimize_window(
+            window: Annotated[str, Field(description="Window ID, title, or class.")],
+            ctx: Context[ServerSession, SessionContext] | None = None,
+        ) -> CallToolResult:
+            """Minimize a live Xfce window."""
+            return await _window_tool(ctx, "minimize_window", window)
+
+        async def close_window(
+            window: Annotated[str, Field(description="Window ID, title, or class.")],
+            ctx: Context[ServerSession, SessionContext] | None = None,
+        ) -> CallToolResult:
+            """Close a live Xfce window."""
+            return await _window_tool(ctx, "close_window", window)
+
+        desktop_tool_specs: list[
+            tuple[Callable[..., Any], str, str, dict[str, Any] | None]
+        ] = [
+            (
+                look_at_screen,
+                "look_at_screen",
+                "Return the live Xfce screen as PNG pixels and/or an AT-SPI snapshot.",
+                None,
+            ),
+            (click, "click", "Click an AT-SPI element reference or screen coordinates.", _computer_ui_meta()),
+            (type_on_screen, "type", "Type into the active Xfce control.", _computer_ui_meta()),
+            (scroll, "scroll", "Scroll the live Xfce desktop.", _computer_ui_meta()),
+            (list_windows, "list_windows", "List live Xfce windows.", _computer_ui_meta()),
+            (switch_window, "switch_window", "Activate and raise an Xfce window.", _computer_ui_meta()),
+            (move_window, "move_window", "Move or resize an Xfce window.", _computer_ui_meta()),
+            (maximize_window, "maximize_window", "Maximize an Xfce window.", _computer_ui_meta()),
+            (restore_window, "restore_window", "Restore an Xfce window.", _computer_ui_meta()),
+            (minimize_window, "minimize_window", "Minimize an Xfce window.", _computer_ui_meta()),
+            (close_window, "close_window", "Close an Xfce window.", _computer_ui_meta()),
+        ]
+        for tool, name, tool_description, meta in desktop_tool_specs:
+            mcp.add_tool(tool, name=name, description=tool_description, meta=meta)
+
+        desktop_resource_objects = {
+            uri: mcp._resource_manager._resources[uri]
+            for uri in (SCREEN_IMAGE_URI, SCREEN_ACCESSIBILITY_URI)
+        }
+        desktop_capabilities_enabled = True
+
+        def sync_desktop_capabilities(enabled: bool) -> None:
+            nonlocal desktop_capabilities_enabled
+            if desktop_capabilities_enabled == enabled:
+                return
+            if enabled:
+                for tool, name, tool_description, meta in desktop_tool_specs:
+                    mcp.add_tool(
+                        tool,
+                        name=name,
+                        description=tool_description,
+                        meta=meta,
+                    )
+                for resource in desktop_resource_objects.values():
+                    mcp.add_resource(resource)
+            else:
+                for _tool, name, _description, _meta in desktop_tool_specs:
+                    mcp.remove_tool(name)
+                for uri in desktop_resource_objects:
+                    mcp._resource_manager._resources.pop(uri, None)
+            desktop_capabilities_enabled = enabled
+
+        desktop_capability_sync = sync_desktop_capabilities
+        desktop_capability_sync(config.desktop_environment)
+
+    @mcp.resource(
+        DASHBOARD_URI,
+        name="Virtual Computer",
+        title="Virtual Computer",
+        description="Three.js laptop-on-desk view for terminal and file operations.",
+        mime_type=DASHBOARD_MIME_TYPE,
+        meta=DASHBOARD_RESOURCE_META,
+    )
+    def virtual_computer_resource() -> str:
+        return dashboard_html()
+
+    _enable_mcp_apps_capability(mcp)
 
     return mcp

@@ -12,7 +12,8 @@ from kilntainers.backends import (
     get_available_backend_names,
     get_backend_class,
 )
-from kilntainers.config import BackendConfig, ServerConfig
+from kilntainers.computers import validate_computer_id
+from kilntainers.config import BackendConfig, ServerConfig, env_flag
 from kilntainers.errors import BackendError
 from kilntainers.server import create_server
 
@@ -27,12 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
         An ArgumentParser with all kilntainers arguments organized into groups.
     """
     parser = argparse.ArgumentParser(
-        prog="kilntainers",
+        prog="mcp-virtual-computer",
         description=(
-            "MCP server providing isolated Linux sandboxes "
-            "for LLM agent shell execution."
+            "MCP server providing one persistent, visually rendered local "
+            "Docker computer for LLM agents."
         ),
-        usage="%(prog)s [-h] [--backend {docker,go_busybox,modal,wasm}] [--transport {stdio,http}] [...]",
+        usage="%(prog)s [-h] [--transport {stdio,http}] [...]",
     )
 
     # Get available backend names for choices
@@ -40,12 +41,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- Core parameters ---
     core = parser.add_argument_group("core options")
-    core.add_argument(
-        "--backend",
-        default="docker",
-        choices=available_backends,
-        help=f"Backend to use (default: docker). Available: {', '.join(available_backends)}",
-    )
     core.add_argument(
         "--transport",
         default="stdio",
@@ -130,9 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
             backend_cls = get_backend_class(name)
             backend_cls.add_cli_arguments(group)
         except BackendError:
-            # Dependencies not installed — skip this backend's CLI args.
-            # The backend name still appears in --backend choices so the
-            # user can discover it, and gets a clear install message if selected.
+            # Keep --help available if the local Docker adapter cannot initialize.
             pass
 
     return parser
@@ -164,6 +157,9 @@ def build_configs(
         port=port,
         default_timeout=args.timeout,
         output_limit=args.output_limit,
+        computer_id=os.getenv("COMPUTER_ID", ""),
+        desktop_environment=env_flag("DESKTOP_ENVIRONMENT", default=False),
+        network_access=env_flag("NETWORK_ACCESS", default=args.network),
         tool_instruction_override=args.tool_instruction_override,
         extended_tool_instruction=args.extended_tool_instruction,
         session_timeout=session_timeout,
@@ -172,7 +168,7 @@ def build_configs(
     )
 
     # Delegate backend config construction to the backend class
-    backend_cls = get_backend_class(args.backend)
+    backend_cls = get_backend_class("docker")
     backend_config = backend_cls.config_from_args(args)
 
     return server_config, backend_config
@@ -189,7 +185,7 @@ def _startup_error(message: str) -> NoReturn:
     Raises:
         SystemExit: Always exits with code 1.
     """
-    sys.stderr.write(f"kilntainers: error: {message}\n")
+    sys.stderr.write(f"mcp-virtual-computer: error: {message}\n")
     sys.exit(1)
 
 
@@ -247,6 +243,13 @@ def validate_config(server_config: ServerConfig) -> None:
     # Output limit must be positive
     if server_config.output_limit < 1:
         _startup_error("--output-limit must be at least 1 byte.")
+
+    if not server_config.computer_id:
+        _startup_error("COMPUTER_ID is required (example: COMPUTER_ID=agent-workstation).")
+    try:
+        validate_computer_id(server_config.computer_id)
+    except BackendError as error:
+        _startup_error(str(error).replace("computer_id", "COMPUTER_ID"))
 
     if (
         server_config.transport == "http"
@@ -315,7 +318,7 @@ def main() -> None:
     validate_config(server_config)
 
     # Create backend (validation happens lazily on first terminal_execute)
-    backend_name = args.backend
+    backend_name = "docker"
     backend_class = get_backend_class(backend_name)
     backend_class.prepare_runtime()
     backend = backend_class(backend_config)

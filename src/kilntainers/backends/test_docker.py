@@ -10,6 +10,7 @@ import pytest
 
 from kilntainers.backends.base import ExecRequest
 from kilntainers.backends.docker import (
+    DEFAULT_DESKTOP_IMAGE,
     DockerBackend,
     DockerBackendConfig,
     DockerSandbox,
@@ -175,6 +176,28 @@ class TestDockerBackendImageManagement:
 
         # Should have called image inspect only
         # (mock responses are LIFO, so we can't verify order easily here)
+
+    @pytest.mark.asyncio
+    async def test_stale_bundled_desktop_image_is_rebuilt(self, monkeypatch):
+        """A changed bundled image must not be hidden by its stable local tag."""
+        calls: list[tuple[str, ...]] = []
+
+        async def run_docker(*args, **kwargs):
+            calls.append(args)
+            if "inspect" in args:
+                return (
+                    0,
+                    b'[{"Config":{"Labels":{"mcp-virtual-computer.image-version":"1"}}}]',
+                    b"",
+                )
+            return 0, b"", b""
+
+        backend = DockerBackend(DockerBackendConfig(image=DEFAULT_DESKTOP_IMAGE))
+        monkeypatch.setattr(backend, "_run_docker", run_docker)
+
+        await backend._ensure_image()
+
+        assert any("build" in call for call in calls)
 
     @pytest.mark.asyncio
     async def test_image_not_local_pull_success(self, monkeypatch, default_config):
@@ -428,8 +451,8 @@ class TestDockerBackendRunCommand:
         assert "--rm" in cmd
         assert "--label" in cmd
         assert "kilntainers=true" in cmd
-        assert "--network" in cmd
-        assert "none" in cmd
+        assert "--network" not in cmd
+        assert "none" not in cmd
         assert default_config.image in cmd
         assert "tail" in cmd
         assert "-f" in cmd

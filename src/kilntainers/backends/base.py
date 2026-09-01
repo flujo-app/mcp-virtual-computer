@@ -2,6 +2,7 @@
 
 import argparse
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from inspect import signature
 from types import TracebackType
@@ -9,6 +10,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kilntainers.config import BackendConfig
+    from kilntainers.windows_docker import DockerRuntimeProgress
+
+RuntimeProgressReporter = Callable[["DockerRuntimeProgress"], Awaitable[None]]
 
 # --- Shared types ---
 
@@ -128,6 +132,21 @@ class Sandbox(ABC):
         """Whether this computer should be removed when its MCP owner exits."""
         return getattr(self, "_managed_temporary", True)
 
+    @property
+    def desktop_url(self) -> str | None:
+        """Browser-reachable noVNC websocket URL, when a desktop is enabled."""
+        return None
+
+    @property
+    def desktop_environment(self) -> bool:
+        """Whether this sandbox is backed by a real desktop environment."""
+        return self.desktop_url is not None
+
+    @property
+    def network_access(self) -> bool:
+        """Whether this sandbox currently permits outbound network traffic."""
+        return True
+
     @abstractmethod
     async def exec(self, request: ExecRequest) -> ExecResult:
         """Execute a command in the sandbox.
@@ -201,6 +220,28 @@ class Backend(ABC):
         when that backend is selected.
         """
 
+    def start_runtime_preparation(self) -> None:
+        """Start optional lazy host-runtime preparation without blocking."""
+
+    async def ensure_runtime(
+        self,
+        progress: RuntimeProgressReporter | None = None,
+    ) -> None:
+        """Wait for optional host-runtime preparation to finish."""
+
+    def runtime_status(self) -> dict[str, object]:
+        """Return optional host-runtime preparation state for an MCP App."""
+        return {
+            "runtime_state": "ready",
+            "runtime_phase": "ready",
+            "runtime_message": "Container runtime bootstrap is not required.",
+            "runtime_progress": 4.0,
+            "runtime_total": 4.0,
+            "downloaded_bytes": None,
+            "download_total_bytes": None,
+            "runtime_error": None,
+        }
+
     @classmethod
     @abstractmethod
     def add_cli_arguments(cls, group: argparse._ArgumentGroup) -> None:
@@ -265,7 +306,7 @@ class Backend(ABC):
         if "computer_id" not in parameters:
             # Compatibility for third-party backends built against the original
             # no-argument _create_sandbox contract.
-            return await self._create_sandbox()  # type: ignore[call-arg]
+            return await self._create_sandbox()
         return await self._create_sandbox(
             computer_id=computer_id,
             temporary=temporary,
@@ -292,8 +333,8 @@ class Backend(ABC):
     async def attach_sandbox(self, computer_id: str) -> Sandbox | None:
         """Attach to a provider computer created by an earlier process.
 
-        Backends with provider-side discovery (Docker and Fly Machines) should
-        override this. Returning ``None`` means no matching computer exists.
+        Backends with provider-side discovery should override this. Returning
+        ``None`` means no matching computer exists.
         """
         return None
 
@@ -311,6 +352,18 @@ class Backend(ABC):
 
     async def factory_reset_computer(self, computer_id: str) -> Sandbox | None:
         """Recreate a managed computer from its configured base image."""
+        return None
+
+    async def set_network_access(
+        self, computer_id: str, enabled: bool
+    ) -> Sandbox | None:
+        """Change outbound network access for a managed computer, if supported."""
+        return None
+
+    async def switch_desktop_environment(
+        self, computer_id: str, enabled: bool
+    ) -> Sandbox | None:
+        """Switch a managed computer's UI mode without losing its state."""
         return None
 
     @abstractmethod

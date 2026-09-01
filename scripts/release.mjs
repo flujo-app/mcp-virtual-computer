@@ -15,8 +15,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const repository = "flujo-app/mcp-sandbox-computer-vm-for-ai";
-const distribution = "mcp-sandbox-computer-vm-for-ai";
+const repository = "flujo-app/mcp-virtual-computer";
+const distribution = "mcp-virtual-computer";
 const releaseWorkflow = "release.yml";
 const args = process.argv.slice(2);
 const checkOnly = takeFlag("--check");

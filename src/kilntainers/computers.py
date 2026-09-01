@@ -49,9 +49,7 @@ def random_computer_id() -> str:
 def validate_computer_id(computer_id: str) -> str:
     """Validate and return a stable computer ID.
 
-    IDs intentionally follow the common Docker/Fly lowercase slug subset, so
-    the same value works across both providers and can safely become a resource
-    name without provider-specific rewriting.
+    IDs intentionally use a conservative lowercase Docker-safe slug format.
     """
     value = computer_id.strip()
     if not _COMPUTER_ID_RE.fullmatch(value):
@@ -72,8 +70,8 @@ class _ComputerRecord:
 class ComputerRegistry:
     """Coordinate named sandboxes across MCP sessions in one server process.
 
-    Docker and Fly backends additionally discover computers provider-side, so
-    permanent records survive a server restart and can be reattached by ID.
+    The Docker backend also discovers computers provider-side, so permanent
+    records survive a server restart and can be reattached by ID.
     """
 
     def __init__(self, backend: Backend) -> None:
@@ -237,6 +235,41 @@ class ComputerRegistry:
             else:
                 record.sandbox = replacement
             return replacement
+
+    async def set_network_access(self, computer_id: str, enabled: bool) -> Sandbox:
+        """Change real network access and refresh the attached sandbox handle."""
+        computer_id = validate_computer_id(computer_id)
+        async with self._lock:
+            record = self._records.get(computer_id)
+            if record is None:
+                raise BackendError(f"Computer '{computer_id}' was not found.")
+            replacement = await self.backend.set_network_access(computer_id, enabled)
+            if replacement is None:
+                raise BackendError("This backend cannot change network access at runtime.")
+            self._tag(replacement, computer_id, record.temporary)
+            record.sandbox = replacement
+            return replacement
+
+    async def switch_desktop_environment(
+        self,
+        computer_id: str,
+        enabled: bool,
+    ) -> Sandbox:
+        """Switch virtual/Xfce mode while preserving the whole computer."""
+        computer_id = validate_computer_id(computer_id)
+        async with self._lock:
+            record = self._records.get(computer_id)
+            if record is None:
+                raise BackendError(f"Computer '{computer_id}' was not found.")
+            updated = await self.backend.switch_desktop_environment(
+                computer_id,
+                enabled,
+            )
+            if updated is None:
+                raise BackendError("This backend cannot switch desktop mode at runtime.")
+            self._tag(updated, computer_id, record.temporary)
+            record.sandbox = updated
+            return updated
 
     async def delete(self, computer_id: str) -> None:
         """Permanently delete a managed computer."""

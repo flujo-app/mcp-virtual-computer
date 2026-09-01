@@ -15,7 +15,7 @@ class TestServerConfig:
 
     def test_defaults(self, monkeypatch) -> None:
         """Default construction should produce expected values."""
-        monkeypatch.delenv("ENABLE_LIFECYCLE_TOOLS", raising=False)
+        monkeypatch.delenv("DESKTOP_ENVIRONMENT", raising=False)
         config = ServerConfig()
         assert config.transport == "stdio"
         assert config.host == "127.0.0.1"
@@ -24,7 +24,10 @@ class TestServerConfig:
         assert config.output_limit == 2_097_152
         assert config.tool_instruction_override is None
         assert config.extended_tool_instruction is None
-        assert config.enable_lifecycle_tools is False
+        assert config.computer_id == "virtual-computer"
+        assert config.desktop_environment is False
+        assert config.network_access is True
+        assert config.workspace_directory == "/workspace"
         assert config.session_timeout == 300
 
     def test_custom_values(self) -> None:
@@ -37,7 +40,9 @@ class TestServerConfig:
             output_limit=1_048_576,
             tool_instruction_override="custom",
             extended_tool_instruction="extended",
-            enable_lifecycle_tools=True,
+            computer_id="studio-computer",
+            desktop_environment=True,
+            network_access=False,
             session_timeout=600,
         )
         assert config.transport == "http"
@@ -47,7 +52,9 @@ class TestServerConfig:
         assert config.output_limit == 1_048_576
         assert config.tool_instruction_override == "custom"
         assert config.extended_tool_instruction == "extended"
-        assert config.enable_lifecycle_tools is True
+        assert config.computer_id == "studio-computer"
+        assert config.desktop_environment is True
+        assert config.network_access is False
         assert config.session_timeout == 600
 
     def test_frozen_immutable(self) -> None:
@@ -74,7 +81,7 @@ class TestDockerBackendConfig:
         assert config.engine == "docker"
         assert config.image == "debian:bookworm-slim"
         assert config.shell == "/bin/bash"
-        assert config.network_enabled is False
+        assert config.network_enabled is True
         assert config.cpu is None
         assert config.memory is None
         assert config.docker_run_flags == []

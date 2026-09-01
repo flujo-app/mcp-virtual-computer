@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Virtual Computer</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #090d13; }
+      #scene { display: block; width: 100%; height: 100%; outline: none; }
+      #vnc-source {
+        position: fixed;
+        left: -10000px;
+        top: 0;
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="scene" tabindex="0" aria-label="Interactive 3D laptop on a desk"></canvas>
+    <div id="vnc-source" aria-hidden="true"></div>
+    <!-- SCRIPT -->
+  </body>
+</html>

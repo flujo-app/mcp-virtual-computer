@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.flujo-app/mcp-sandbox-computer-vm-for-ai",
-  "title": "MCP Sandbox Computer VM for AI",
-  "description": "Named Docker and Fly Machine sandbox computers with an interactive MCP App dashboard.",
-  "version": "0.2.2",
+  "name": "io.github.flujo-app/mcp-virtual-computer",
+  "title": "MCP Virtual Computer",
+  "description": "A persistent local Docker computer rendered as a Three.js laptop, with an optional live Xfce desktop.",
+  "version": "0.2.3",
   "repository": {
-    "url": "https://github.com/flujo-app/mcp-sandbox-computer-vm-for-ai",
+    "url": "https://github.com/flujo-app/mcp-virtual-computer",
     "source": "github"
   },
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
-      "identifier": "mcp-sandbox-computer-vm-for-ai",
-      "version": "0.2.2",
+      "identifier": "mcp-virtual-computer",
+      "version": "0.2.3",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

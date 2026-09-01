@@ -72,18 +72,24 @@ async def test_permanent_computer_survives_session_release() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_reuses_random_default_but_explicit_ids_are_independent() -> None:
+async def test_session_reuses_only_configured_persistent_computer() -> None:
     backend = MockBackend(BackendConfig())
-    session = SessionContext(backend=backend, transport="http")
+    session = SessionContext(
+        backend=backend,
+        transport="http",
+        computer_id="named-one",
+    )
 
     default_one = await session.get_or_create_sandbox()
     default_two = await session.get_or_create_sandbox()
-    named = await session.get_or_create_sandbox("named-one", temporary=True)
-
     assert default_one is default_two
-    assert default_one.computer_id != "named-one"
-    assert named.computer_id == "named-one"
-    assert backend.create_count == 2
+    assert default_one.computer_id == "named-one"
+    assert default_one.temporary is False
+    assert backend.create_count == 1
+    with pytest.raises(BackendError, match="one computer selected by COMPUTER_ID"):
+        await session.get_or_create_sandbox("other-computer")
+    with pytest.raises(BackendError, match="Temporary computers are disabled"):
+        await session.get_or_create_sandbox("named-one", temporary=True)
     await session.cleanup()
 
 
