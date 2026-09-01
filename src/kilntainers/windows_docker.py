@@ -9,6 +9,7 @@ WinGet prints byte counts, genuine download totals.
 from __future__ import annotations
 
 import ctypes
+import importlib
 import os
 import queue
 import re
@@ -20,6 +21,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 from kilntainers.config import env_flag
 from kilntainers.errors import BackendError
@@ -185,7 +187,8 @@ def _path_contains(value: str, entry: Path) -> bool:
 def _broadcast_environment_change() -> None:
     """Tell already-running Windows apps that the user environment changed."""
     try:
-        user32 = ctypes.windll.user32
+        windll: Any = getattr(ctypes, "windll")
+        user32 = windll.user32
         result = ctypes.c_size_t()
         user32.SendMessageTimeoutW(
             0xFFFF,
@@ -202,7 +205,8 @@ def _broadcast_environment_change() -> None:
 
 def _persist_user_path(directory: Path) -> None:
     """Append a directory to HKCU's PATH without ``setx`` truncation."""
-    import winreg
+    # Import dynamically because ``winreg`` only exposes its API on Windows.
+    winreg = cast(Any, importlib.import_module("winreg"))
 
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
         try:
