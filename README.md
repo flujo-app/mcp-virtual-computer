@@ -40,9 +40,12 @@ A VM for your agent. And for you.
 - `read_file` — read a UTF-8 text file relative to `/workspace` or by absolute path.
 - `write_file` — atomically write a UTF-8 text file.
 - `edit_file` — replace one exact text match, or all matches when requested.
-- `computer_ui` — open or attach the Three.js computer view.
+- `computer_ui` — open or attach the Three.js computer view. Its result includes
+  both the MCP App `resource_uri` and a real loopback `url`/`dashboard_url` that
+  opens in an external browser, including for stdio clients.
 
-With `DESKTOP_ENVIRONMENT=true`, it additionally exposes:
+`DESKTOP_ENVIRONMENT` defaults to `true`. With the real desktop enabled it
+additionally exposes:
 
 - `look_at_screen` — return the current PNG framebuffer, AT-SPI snapshot, or both.
 - `click`, `type`, and `scroll` — interact by AT-SPI element reference or coordinates.

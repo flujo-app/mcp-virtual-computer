@@ -1,6 +1,7 @@
 """Docker named-computer management tests."""
 
 import json
+from typing import cast
 
 import pytest
 
@@ -150,7 +151,7 @@ async def test_attach_preserves_live_desktop_and_network_state(monkeypatch) -> N
 async def test_refresh_reads_shared_modes_with_one_docker_exec(monkeypatch) -> None:
     backend = DockerBackend(DockerBackendConfig())
     row = inspect_row()
-    network = row.setdefault("NetworkSettings", {})
+    network = cast(dict[str, object], row.setdefault("NetworkSettings", {}))
     assert isinstance(network, dict)
     network["Ports"] = {"6080/tcp": [{"HostPort": "49152"}]}
     sandbox = backend._sandbox_from_inspect(row)

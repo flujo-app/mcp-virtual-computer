@@ -76,7 +76,9 @@ def test_desktop_offline_firewall_cuts_existing_internet_connections() -> None:
 
 
 def test_headless_computer_is_persistent_and_uses_workspace() -> None:
-    backend = DockerBackend(DockerBackendConfig(network_enabled=True))
+    backend = DockerBackend(
+        DockerBackendConfig(network_enabled=True, desktop_environment=False)
+    )
     command = backend._build_run_command(computer_id="desk", temporary=False)
 
     assert "--rm" not in command

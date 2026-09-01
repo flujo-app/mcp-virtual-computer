@@ -1,10 +1,13 @@
 """CLI argument parsing and main entry point."""
 
 import argparse
+import asyncio
 import os
 import signal
+import socket
 import sys
 import threading
+from dataclasses import replace
 from typing import NoReturn
 
 from kilntainers.auth import BearerTokenMiddleware
@@ -50,13 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
     core.add_argument(
         "--host",
         default=_UNSET,
-        help="HTTP bind address (default: 127.0.0.1, HTTP mode only)",
+        help="HTTP bind address (default: 127.0.0.1)",
     )
     core.add_argument(
         "--port",
         type=int,
         default=_UNSET,
-        help="HTTP listen port (default: 8435, HTTP mode only)",
+        help=(
+            "HTTP/dashboard port (default: 8435 in HTTP mode; "
+            "an available loopback port in stdio mode)"
+        ),
     )
     core.add_argument(
         "--timeout",
@@ -158,7 +164,7 @@ def build_configs(
         default_timeout=args.timeout,
         output_limit=args.output_limit,
         computer_id=os.getenv("COMPUTER_ID", ""),
-        desktop_environment=env_flag("DESKTOP_ENVIRONMENT", default=False),
+        desktop_environment=env_flag("DESKTOP_ENVIRONMENT", default=True),
         network_access=env_flag("NETWORK_ACCESS", default=args.network),
         expose_lifecycle_tools=env_flag(
             "EXPOSE_LIFECYCLE_TOOLS",
@@ -206,26 +212,12 @@ def validate_config(server_config: ServerConfig) -> None:
     Raises:
         SystemExit: If validation fails, with code 1 and an error message.
     """
-    # HTTP-only parameters in stdio mode
-    # When called from main(), _parsed_args contains the actual parsed args
-    # When called from tests, we rely on comparing config values to defaults
+    # The stdio transport also starts a loopback HTTP companion so computer_ui
+    # can return a real standalone URL. It must never bind beyond loopback.
     if server_config.transport == "stdio":
-        # Check if user explicitly passed HTTP-only args
-        # We check if values differ from defaults, indicating explicit setting
         if server_config.host != "127.0.0.1":
             _startup_error(
-                "--host is only valid with --transport http. "
-                "In stdio mode, there is no HTTP server to bind."
-            )
-        if server_config.port != 8435:
-            _startup_error(
-                "--port is only valid with --transport http. "
-                "In stdio mode, there is no HTTP server to bind."
-            )
-        if server_config.session_timeout != 300:
-            _startup_error(
-                "--session-timeout is only valid with --transport http. "
-                "In stdio mode, the session lives as long as the process."
+                "The stdio dashboard companion only supports --host 127.0.0.1."
             )
 
     # Mutual exclusivity: tool description params
@@ -298,9 +290,43 @@ async def _async_main(
     except BackendError as e:
         _startup_error(str(e))
 
-    # Run the transport (blocks until shutdown)
-    transport = "stdio" if server_config.transport == "stdio" else "streamable-http"
-    mcp.run(transport=transport)
+    if server_config.transport == "stdio":
+        await _run_stdio_with_dashboard(mcp, server_config)
+    else:
+        await mcp.run_streamable_http_async()
+
+
+def _available_loopback_port() -> int:
+    """Reserve an OS-selected port number for the stdio dashboard companion."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+async def _run_stdio_with_dashboard(mcp, server_config: ServerConfig) -> None:
+    """Serve stdio MCP and a standalone loopback dashboard on one event loop."""
+    import uvicorn
+
+    app = mcp.streamable_http_app()
+    uvicorn_config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=server_config.port,
+        log_level="warning",
+        access_log=False,
+    )
+    dashboard_server = uvicorn.Server(uvicorn_config)
+    dashboard_task = asyncio.create_task(dashboard_server.serve())
+    try:
+        while not dashboard_server.started:
+            if dashboard_task.done():
+                await dashboard_task
+                raise RuntimeError("The standalone dashboard server stopped during startup.")
+            await asyncio.sleep(0.01)
+        await mcp.run_stdio_async()
+    finally:
+        dashboard_server.should_exit = True
+        await dashboard_task
 
 
 def main() -> None:
@@ -319,6 +345,8 @@ def main() -> None:
     args = parser.parse_args()
 
     server_config, backend_config = build_configs(args)
+    if server_config.transport == "stdio" and args.port is _UNSET:
+        server_config = replace(server_config, port=_available_loopback_port())
     validate_config(server_config)
 
     # Create backend (validation happens lazily on first terminal_execute)
@@ -332,10 +360,6 @@ def main() -> None:
         mcp = create_server(backend, server_config)
     except BackendError as e:
         _startup_error(str(e))
-
-    # Run the transport (blocks until shutdown)
-    # mcp.run() manages its own event loop, so we call it directly
-    transport = "stdio" if server_config.transport == "stdio" else "streamable-http"
 
     # Register SIGTERM handler to convert to SIGINT for clean shutdown
     # FastMCP handles SIGINT (Ctrl+C) gracefully, so we redirect SIGTERM to the same path
@@ -359,7 +383,9 @@ def main() -> None:
         signal.signal(signal.SIGBREAK, _handle_sigterm)
 
     try:
-        if server_config.transport == "http" and server_config.auth_token:
+        if server_config.transport == "stdio":
+            asyncio.run(_run_stdio_with_dashboard(mcp, server_config))
+        elif server_config.auth_token:
             import uvicorn
 
             app = mcp.streamable_http_app()
@@ -374,6 +400,6 @@ def main() -> None:
                 log_level="info",
             )
         else:
-            mcp.run(transport=transport)
+            mcp.run(transport="streamable-http")
     except KeyboardInterrupt:
         pass  # Clean exit on Ctrl+C

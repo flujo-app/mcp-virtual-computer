@@ -15,6 +15,7 @@ from kilntainers.config import BackendConfig, ServerConfig
 from kilntainers.errors import BackendError
 from kilntainers.server import (
     SessionContext,
+    _computer_desktop_proxy_url,
     _computer_ui_url,
     _create_handler,
     assemble_tool_description,
@@ -25,8 +26,8 @@ from kilntainers.server import (
 # --- Test Configuration ---
 
 
-def test_computer_ui_url_uses_app_uri_for_stdio() -> None:
-    assert _computer_ui_url(ServerConfig()) == "ui://virtual-computer/computer.html"
+def test_computer_ui_url_uses_standalone_dashboard_for_stdio() -> None:
+    assert _computer_ui_url(ServerConfig()) == "http://127.0.0.1:8435/dashboard.html"
 
 
 def test_computer_ui_url_uses_reachable_http_dashboard() -> None:
@@ -43,6 +44,15 @@ def test_computer_ui_url_brackets_ipv6_hosts() -> None:
     config = ServerConfig(transport="http", host="::1", port=4173)
 
     assert _computer_ui_url(config) == "http://[::1]:4173/dashboard.html"
+
+
+def test_computer_desktop_proxy_url_uses_exact_server_port() -> None:
+    config = ServerConfig(transport="stdio", port=43123)
+
+    assert (
+        _computer_desktop_proxy_url(config)
+        == "ws://127.0.0.1:43123/desktop/websockify"
+    )
 
 
 @pytest.fixture
@@ -127,7 +137,7 @@ def test_assemble_tool_description_empty_backend_no_override() -> None:
 
 def test_assemble_tool_description_both_override_and_extended() -> None:
     """Both override and extended raises BackendError."""
-    backend = MockBackend(BackendConfig(), tool_instructions="test")  # type: ignore[arg-type]
+    backend = MockBackend(BackendConfig(), tool_instructions="test")
     with pytest.raises(BackendError) as exc_info:
         assemble_tool_description(
             backend,
@@ -824,6 +834,7 @@ def test_public_tool_schemas_have_no_lifecycle_selector(mock_backend: MockBacken
         mock_backend,
         ServerConfig(
             computer_id="fixed-computer",
+            desktop_environment=False,
             expose_lifecycle_tools=True,
         ),
     )

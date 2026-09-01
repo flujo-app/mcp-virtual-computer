@@ -191,7 +191,7 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.08;
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;
 
 const controls = new OrbitControls(camera, sceneCanvas);
 controls.target.set(0, 1.25, -0.15);
@@ -1669,6 +1669,25 @@ function startRuntimePolling() {
   void pollRuntimeStatus();
   runtimePollTimer = window.setInterval(() => void pollRuntimeStatus(), 1000);
 }
+
+function stopRuntimePolling() {
+  if (runtimePollTimer === undefined) return;
+  window.clearInterval(runtimePollTimer);
+  runtimePollTimer = undefined;
+}
+
+app.onteardown = async () => {
+  stopRuntimePolling();
+  disconnectDesktop();
+  directClient?.close().catch(() => undefined);
+  directClient = null;
+  return {};
+};
+
+window.addEventListener("pagehide", () => {
+  stopRuntimePolling();
+  disconnectDesktop();
+});
 
 async function toggleNetworkCable() {
   if (!state.lifecycleToolsExposed) return;

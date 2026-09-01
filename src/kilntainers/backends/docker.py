@@ -56,7 +56,7 @@ class DockerBackendConfig(BackendConfig):
     cpu: str | None = None
     memory: str | None = None
     docker_run_flags: list[str] = field(default_factory=list)
-    desktop_environment: bool = False
+    desktop_environment: bool = True
     workspace_directory: str = "/workspace"
 
 
@@ -142,7 +142,7 @@ class DockerBackend(Backend):
         """Build DockerBackendConfig from parsed CLI arguments."""
         # Use core --shell with a backend-specific default
         shell = args.shell if args.shell is not None else "/bin/bash"
-        desktop_environment = env_flag("DESKTOP_ENVIRONMENT", default=False)
+        desktop_environment = env_flag("DESKTOP_ENVIRONMENT", default=True)
         image = args.image
         network_access = env_flag("NETWORK_ACCESS", default=args.network)
         return DockerBackendConfig(

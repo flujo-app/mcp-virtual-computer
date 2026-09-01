@@ -114,19 +114,11 @@ class TestCLIValidation:
         assert "--host" in result.stderr
         assert "stdio" in result.stderr.lower()
 
-    def test_cli_rejects_stdio_with_port(self):
-        """CLI rejects --port in stdio mode."""
-        result = subprocess.run(
-            [sys.executable, "-m", "kilntainers", "--port", "9090"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+    def test_cli_accepts_stdio_dashboard_port(self):
+        """CLI accepts an explicit port for the stdio dashboard companion."""
+        args = build_parser().parse_args(["--port", "9090"])
 
-        # Should exit with code 1 (validation error)
-        assert result.returncode == 1
-        # Error message should mention the issue
-        assert "--port" in result.stderr
+        assert args.port == 9090
 
     def test_cli_rejects_both_tool_description_params(self):
         """CLI rejects both --tool-instruction-override and --extended-tool-instruction."""

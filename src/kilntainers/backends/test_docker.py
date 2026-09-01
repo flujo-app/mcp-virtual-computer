@@ -128,8 +128,8 @@ def mock_subprocess(monkeypatch):
 
 @pytest.fixture
 def default_config():
-    """Return a default DockerBackendConfig."""
-    return DockerBackendConfig()
+    """Return a headless config for backend command unit tests."""
+    return DockerBackendConfig(desktop_environment=False)
 
 
 # --- DockerBackend tests ---

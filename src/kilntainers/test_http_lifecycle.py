@@ -50,7 +50,7 @@ class TestHTTPLifespan:
         # Mock os.kill to capture calls
         original_kill = os.kill
 
-        def mock_kill(pid: int, sig: int) -> None:  # type: ignore[assignment]
+        def mock_kill(pid: int, sig: int) -> None:
             if sig == signal.SIGTERM:
                 sigterm_calls.append((pid, sig))
 
@@ -73,7 +73,7 @@ class TestHTTPLifespan:
                 await asyncio.sleep(0.2)
 
         finally:
-            os.kill = original_kill  # type: ignore[assignment]
+            os.kill = original_kill
 
         # In HTTP mode, SIGTERM should NOT be sent
         assert len(sigterm_calls) == 0, (

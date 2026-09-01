@@ -41,10 +41,10 @@
         {
           "name": "DESKTOP_ENVIRONMENT",
           "description": "Start the real Xfce desktop instead of the virtual desktop.",
-          "default": "false",
+          "default": "true",
           "choices": [
-            "false",
-            "true"
+            "true",
+            "false"
           ],
           "format": "boolean",
           "isRequired": false,

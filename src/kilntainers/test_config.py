@@ -25,7 +25,7 @@ class TestServerConfig:
         assert config.tool_instruction_override is None
         assert config.extended_tool_instruction is None
         assert config.computer_id == "virtual-computer"
-        assert config.desktop_environment is False
+        assert config.desktop_environment is True
         assert config.network_access is True
         assert config.expose_lifecycle_tools is False
         assert config.workspace_directory == "/workspace"

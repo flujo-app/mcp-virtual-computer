@@ -12,12 +12,16 @@ from kilntainers.dashboard import (
     DASHBOARD_MIME_TYPE,
     DASHBOARD_RESOURCE_META,
     DASHBOARD_URI,
+    dashboard_resource_meta,
 )
 from kilntainers.server import create_server
 
 
 def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
-    server = create_server(MockBackend(BackendConfig()), ServerConfig())
+    server = create_server(
+        MockBackend(BackendConfig()),
+        ServerConfig(desktop_environment=False),
+    )
     tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
     resources = server._resource_manager.list_resources()
 
@@ -51,6 +55,10 @@ def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
     assert len(resources) == 1
     assert str(resources[0].uri) == DASHBOARD_URI
     assert resources[0].mime_type == DASHBOARD_MIME_TYPE
+    resource_meta = resources[0].meta
+    assert resource_meta is not None
+    assert "http://127.0.0.1:8435" in resource_meta["ui"]["csp"]["connectDomains"]
+    assert "ws://127.0.0.1:8435" in resource_meta["ui"]["csp"]["connectDomains"]
 
     capabilities = server._mcp_server.create_initialization_options().capabilities
     payload = capabilities.model_dump(by_alias=True, exclude_none=True)
@@ -68,7 +76,11 @@ def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
 
 async def test_virtual_computer_html_is_self_contained() -> None:
     server = create_server(MockBackend(BackendConfig()), ServerConfig())
-    resource = server._resource_manager.list_resources()[0]
+    resource = next(
+        resource
+        for resource in server._resource_manager.list_resources()
+        if str(resource.uri) == DASHBOARD_URI
+    )
     html = await resource.read()
 
     assert isinstance(html, str)
@@ -89,7 +101,10 @@ async def test_virtual_computer_html_is_self_contained() -> None:
 
 
 def test_lifecycle_management_tools_are_app_only_by_default() -> None:
-    server = create_server(MockBackend(BackendConfig()), ServerConfig())
+    server = create_server(
+        MockBackend(BackendConfig()),
+        ServerConfig(desktop_environment=False),
+    )
 
     tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
     resources = server._resource_manager.list_resources()
@@ -102,6 +117,18 @@ def test_lifecycle_management_tools_are_app_only_by_default() -> None:
     assert payload["extensions"] == {
         "io.modelcontextprotocol/ui": {"mimeTypes": [DASHBOARD_MIME_TYPE]}
     }
+
+
+def test_dashboard_resource_meta_adds_exact_loopback_origins() -> None:
+    meta = dashboard_resource_meta(
+        "http://127.0.0.1:43123/dashboard.html",
+        "ws://127.0.0.1:55779/websockify",
+    )
+
+    assert meta["ui"]["csp"]["connectDomains"][-2:] == [
+        "http://127.0.0.1:43123",
+        "ws://127.0.0.1:55779",
+    ]
 
 
 def test_lifecycle_tools_add_model_visibility_when_enabled() -> None:

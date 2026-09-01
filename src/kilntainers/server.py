@@ -7,7 +7,7 @@ import os
 import signal
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, AsyncContextManager
+from typing import Annotated, Any, AsyncContextManager, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
@@ -15,15 +15,19 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
+from starlette.routing import WebSocketRoute
+from starlette.websockets import WebSocket, WebSocketDisconnect
+from websockets.asyncio.client import connect as connect_websocket
+from websockets.typing import Subprotocol
 
 from kilntainers.backends.base import Backend, ExecRequest, Sandbox
 from kilntainers.computers import ComputerRegistry, random_computer_id
 from kilntainers.config import ServerConfig
 from kilntainers.dashboard import (
     DASHBOARD_MIME_TYPE,
-    DASHBOARD_RESOURCE_META,
     DASHBOARD_URI,
     dashboard_html,
+    dashboard_resource_meta,
 )
 from kilntainers.desktop import animate_file_operation
 from kilntainers.desktop_control import (
@@ -303,15 +307,23 @@ def _lifecycle_payload(config: ServerConfig) -> dict[str, bool]:
 
 
 def _computer_ui_url(config: ServerConfig) -> str:
-    """Return the standalone dashboard URL, or the MCP App URI for stdio."""
-    if config.transport != "http":
-        return DASHBOARD_URI
+    """Return the browser-reachable standalone dashboard URL."""
     host = config.host
     if host in {"0.0.0.0", "::"}:
         host = "127.0.0.1"
     elif ":" in host and not host.startswith("["):
         host = f"[{host}]"
     return f"http://{host}:{config.port}/dashboard.html"
+
+
+def _computer_desktop_proxy_url(config: ServerConfig) -> str:
+    """Return the exact same-process WebSocket endpoint used by the App."""
+    host = config.host
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    elif ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"ws://{host}:{config.port}/desktop/websockify"
 
 
 def _session_from_context(
@@ -836,7 +848,7 @@ def _register_computer_tools(mcp: FastMCP, config: ServerConfig) -> None:
         title="Sandbox Computer Dashboard",
         description="Interactive lifecycle and terminal dashboard for sandbox computers.",
         mime_type=DASHBOARD_MIME_TYPE,
-        meta=DASHBOARD_RESOURCE_META,
+        meta=dashboard_resource_meta(),
     )
     def computer_dashboard_resource() -> str:
         return dashboard_html()
@@ -906,6 +918,21 @@ def create_server(
         port=config.port,
     )
 
+    def sync_dashboard_resource_meta(desktop_url: str | None = None) -> None:
+        """Publish exact loopback origins for hosts that reject wildcard ports."""
+        resource = mcp._resource_manager._resources.get(DASHBOARD_URI)
+        if resource is not None:
+            resource.meta = dashboard_resource_meta(
+                _computer_ui_url(config),
+                _computer_desktop_proxy_url(config),
+                desktop_url,
+            )
+
+    def public_desktop_url(sandbox: Sandbox | None) -> str | None:
+        if sandbox is None or sandbox.desktop_url is None:
+            return None
+        return _computer_desktop_proxy_url(config)
+
     activity_revision = 0
     activity_events: list[dict[str, Any]] = []
 
@@ -974,6 +1001,84 @@ def create_server(
     async def dashboard_page(request: Request) -> HTMLResponse:
         return HTMLResponse(dashboard_html())
 
+    async def desktop_websocket_proxy(websocket: WebSocket) -> None:
+        """Relay VNC/audio WebSockets through the server's exact loopback origin."""
+        if websocket.client is None or websocket.client.host not in {
+            "127.0.0.1",
+            "::1",
+        }:
+            await websocket.close(code=1008)
+            return
+        channel = str(websocket.path_params.get("channel", ""))
+        if channel not in {"websockify", "audio"}:
+            await websocket.close(code=1008)
+            return
+        sandbox = registry.peek(config.computer_id)
+        if sandbox is None or sandbox.desktop_url is None:
+            await websocket.close(code=1013)
+            return
+        target = sandbox.desktop_url.rsplit("/", 1)[0] + f"/{channel}"
+        offered_protocols: list[Subprotocol] = [
+            cast(Subprotocol, item.strip())
+            for item in websocket.headers.get("sec-websocket-protocol", "").split(",")
+            if item.strip()
+        ]
+        try:
+            async with connect_websocket(
+                target,
+                subprotocols=offered_protocols or None,
+                max_size=None,
+            ) as upstream:
+                await websocket.accept(subprotocol=upstream.subprotocol)
+
+                async def browser_to_desktop() -> None:
+                    try:
+                        while True:
+                            message = await websocket.receive()
+                            if message["type"] == "websocket.disconnect":
+                                return
+                            if message.get("bytes") is not None:
+                                await upstream.send(message["bytes"])
+                            elif message.get("text") is not None:
+                                await upstream.send(message["text"])
+                    except WebSocketDisconnect:
+                        return
+
+                async def desktop_to_browser() -> None:
+                    async for message in upstream:
+                        if isinstance(message, bytes):
+                            await websocket.send_bytes(message)
+                        else:
+                            await websocket.send_text(message)
+
+                tasks = {
+                    asyncio.create_task(browser_to_desktop()),
+                    asyncio.create_task(desktop_to_browser()),
+                }
+                _done, pending = await asyncio.wait(
+                    tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+        except Exception:
+            try:
+                await websocket.close(code=1011)
+            except RuntimeError:
+                pass
+
+    mcp._custom_starlette_routes.append(
+        cast(
+            Any,
+            WebSocketRoute(
+                "/desktop/{channel}",
+                endpoint=desktop_websocket_proxy,
+                name="desktop-websocket-proxy",
+            ),
+        )
+    )
+
     handler = _create_handler(config)
 
     # Wrapper closure for better MCP type hinting
@@ -1021,6 +1126,11 @@ def create_server(
             ctx=ctx,
         )
         payload = dict(result.structuredContent or {})
+        if payload.get("desktop_url"):
+            payload["desktop_url"] = public_desktop_url(
+                registry.peek(config.computer_id)
+            )
+            result = _result(payload, is_error=bool(result.isError))
         publish_activity("result", "terminal_execute", arguments, payload)
         return result
 
@@ -1040,6 +1150,7 @@ def create_server(
             return _result(
                 {
                     "url": computer_url,
+                    "dashboard_url": computer_url,
                     "resource_uri": DASHBOARD_URI,
                     "error": "Internal error: no context provided",
                 },
@@ -1052,6 +1163,7 @@ def create_server(
                 {
                     "operation": "idle",
                     "url": computer_url,
+                    "dashboard_url": computer_url,
                     "resource_uri": DASHBOARD_URI,
                     "computer_id": config.computer_id,
                     **_lifecycle_payload(config),
@@ -1069,6 +1181,7 @@ def create_server(
             return _result(
                 {
                     "url": computer_url,
+                    "dashboard_url": computer_url,
                     "resource_uri": DASHBOARD_URI,
                     "error": str(error),
                 },
@@ -1082,17 +1195,19 @@ def create_server(
         if capabilities_changed and ctx is not None:
             await ctx.session.send_tool_list_changed()
             await ctx.session.send_resource_list_changed()
+        sync_dashboard_resource_meta(sandbox.desktop_url)
         return _result(
             {
                 "operation": "idle",
                 "url": computer_url,
+                "dashboard_url": computer_url,
                 "resource_uri": DASHBOARD_URI,
                 "computer_id": config.computer_id,
                 **_lifecycle_payload(config),
                 "computer_attached": True,
                 "desktop_environment": sandbox.desktop_environment,
                 "network_access": sandbox.network_access,
-                "desktop_url": sandbox.desktop_url,
+                "desktop_url": public_desktop_url(sandbox),
                 "workspace_directory": config.workspace_directory,
                 **backend.runtime_status(),
             }
@@ -1160,7 +1275,7 @@ def create_server(
                     if sandbox is not None
                     else config.network_access
                 ),
-                "desktop_url": sandbox.desktop_url if sandbox is not None else None,
+                "desktop_url": public_desktop_url(sandbox),
                 "workspace_directory": config.workspace_directory,
                 **runtime,
             }
@@ -1190,7 +1305,7 @@ def create_server(
                     "computer_id": config.computer_id,
                     **_lifecycle_payload(config),
                     "desktop_environment": sandbox.desktop_environment,
-                    "desktop_url": sandbox.desktop_url,
+                    "desktop_url": public_desktop_url(sandbox),
                     "network_access": sandbox.network_access,
                     "workspace_directory": config.workspace_directory,
                 }
@@ -1227,7 +1342,7 @@ def create_server(
                     "computer_id": config.computer_id,
                     **_lifecycle_payload(config),
                     "desktop_environment": sandbox.desktop_environment,
-                    "desktop_url": sandbox.desktop_url,
+                    "desktop_url": public_desktop_url(sandbox),
                     "network_access": sandbox.network_access,
                     "workspace_directory": config.workspace_directory,
                 }
@@ -1330,7 +1445,7 @@ def create_server(
             "computer_id": config.computer_id,
             "desktop_environment": sandbox.desktop_environment,
             "network_access": sandbox.network_access,
-            "desktop_url": sandbox.desktop_url,
+            "desktop_url": public_desktop_url(sandbox),
             "workspace_directory": config.workspace_directory,
             "path": path,
             "content": content,
@@ -1650,7 +1765,7 @@ def create_server(
                 return _result(
                     {
                         "computer_id": config.computer_id,
-                        "desktop_url": sandbox.desktop_url,
+                        "desktop_url": public_desktop_url(sandbox),
                         **response,
                     }
                 )
@@ -1864,9 +1979,16 @@ def create_server(
         title="Virtual Computer",
         description="Three.js laptop-on-desk view for terminal and file operations.",
         mime_type=DASHBOARD_MIME_TYPE,
-        meta=DASHBOARD_RESOURCE_META,
+        meta=dashboard_resource_meta(
+            _computer_ui_url(config),
+            _computer_desktop_proxy_url(config),
+        ),
     )
     def virtual_computer_resource() -> str:
+        live_sandbox = registry.peek(config.computer_id)
+        sync_dashboard_resource_meta(
+            live_sandbox.desktop_url if live_sandbox is not None else None
+        )
         return dashboard_html()
 
     _enable_mcp_apps_capability(mcp)

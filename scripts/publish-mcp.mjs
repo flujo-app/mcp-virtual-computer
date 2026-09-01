@@ -129,7 +129,7 @@ function verifyMetadata() {
   const marker = `mcp-name: ${serverName}`;
   const expectedEnvironmentDefaults = {
     COMPUTER_ID: "agent-workstation",
-    DESKTOP_ENVIRONMENT: "false",
+    DESKTOP_ENVIRONMENT: "true",
     NETWORK_ACCESS: "true",
     AUTO_INSTALL_DOCKER: "true",
     EXPOSE_LIFECYCLE_TOOLS: "false",

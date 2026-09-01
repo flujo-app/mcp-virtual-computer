@@ -1,7 +1,7 @@
 """Tests for CLI argument parsing, config construction, and validation."""
 
 from typing import cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -189,7 +189,7 @@ def test_build_configs_default_args(monkeypatch):
     assert server_config.tool_instruction_override is None
     assert server_config.extended_tool_instruction is None
     assert server_config.computer_id == "test-computer"
-    assert server_config.desktop_environment is False
+    assert server_config.desktop_environment is True
     assert server_config.expose_lifecycle_tools is False
 
     # Docker config defaults
@@ -385,28 +385,22 @@ def test_validate_config_stdio_mode_with_host():
     assert exc_info.value.code == 1
 
 
-def test_validate_config_stdio_mode_with_port():
-    """Test that --port in stdio mode causes startup error."""
+def test_validate_config_stdio_mode_accepts_dashboard_port():
+    """The stdio companion may use an explicitly selected loopback port."""
     parser = build_parser()
     args = parser.parse_args(["--port", "9090"])
     server_config, _docker_config = build_configs(args)
 
-    with pytest.raises(SystemExit) as exc_info:
-        validate_config(server_config)
-
-    assert exc_info.value.code == 1
+    validate_config(server_config)
 
 
-def test_validate_config_stdio_mode_with_session_timeout():
-    """Test that --session-timeout in stdio mode causes startup error."""
+def test_validate_config_stdio_mode_accepts_dashboard_session_timeout():
+    """The stdio companion exposes the regular HTTP session timeout."""
     parser = build_parser()
     args = parser.parse_args(["--session-timeout", "600"])
     server_config, _docker_config = build_configs(args)
 
-    with pytest.raises(SystemExit) as exc_info:
-        validate_config(server_config)
-
-    assert exc_info.value.code == 1
+    validate_config(server_config)
 
 
 def test_validate_config_http_mode_no_error():
@@ -615,11 +609,14 @@ async def test_async_main_successful_startup():
     mock_backend = MagicMock()
 
     mock_mcp = MagicMock()
-    mock_mcp.run = MagicMock()
 
     with (
         patch("kilntainers.cli.get_backend_class") as mock_get_backend,
         patch("kilntainers.cli.create_server") as mock_create_server,
+        patch(
+            "kilntainers.cli._run_stdio_with_dashboard",
+            new=AsyncMock(),
+        ) as mock_run_stdio,
     ):
         mock_get_backend.return_value = lambda _: mock_backend
         mock_create_server.return_value = mock_mcp
@@ -629,8 +626,7 @@ async def test_async_main_successful_startup():
         # Verify server was created
         mock_create_server.assert_called_once_with(mock_backend, server_config)
 
-        # Verify mcp.run was called with correct transport (keyword arg)
-        mock_mcp.run.assert_called_once_with(transport="stdio")
+        mock_run_stdio.assert_awaited_once_with(mock_mcp, server_config)
 
 
 @pytest.mark.asyncio
@@ -642,7 +638,7 @@ async def test_async_main_transport_mapping():
     mock_backend = MagicMock()
 
     mock_mcp = MagicMock()
-    mock_mcp.run = MagicMock()
+    mock_mcp.run_streamable_http_async = AsyncMock()
 
     with (
         patch("kilntainers.cli.get_backend_class") as mock_get_backend,
@@ -653,8 +649,7 @@ async def test_async_main_transport_mapping():
 
         await _async_main(server_config, docker_config, "docker")
 
-        # Verify transport mapping (keyword arg)
-        mock_mcp.run.assert_called_once_with(transport="streamable-http")
+        mock_mcp.run_streamable_http_async.assert_awaited_once_with()
 
 
 # ================
@@ -667,7 +662,6 @@ def test_main_keyboard_interrupt():
     mock_backend = MagicMock()
 
     mock_mcp = MagicMock()
-    mock_mcp.run = MagicMock(side_effect=KeyboardInterrupt())
 
     with (
         patch("kilntainers.cli.build_parser") as mock_parser,
@@ -675,6 +669,10 @@ def test_main_keyboard_interrupt():
         patch("kilntainers.cli.validate_config"),
         patch("kilntainers.cli.get_backend_class") as mock_get_backend,
         patch("kilntainers.cli.create_server") as mock_create_server,
+        patch(
+            "kilntainers.cli._run_stdio_with_dashboard",
+            new=AsyncMock(side_effect=KeyboardInterrupt()),
+        ),
     ):
         mock_args = MagicMock()
         mock_parser.return_value.parse_args.return_value = mock_args

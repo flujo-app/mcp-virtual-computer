@@ -56,7 +56,7 @@ class ServerConfig:
     # A server process owns exactly one persistent computer. The CLI replaces
     # this programmatic default with the required COMPUTER_ID environment value.
     computer_id: str = "virtual-computer"
-    desktop_environment: bool = False
+    desktop_environment: bool = True
     network_access: bool = True
     expose_lifecycle_tools: bool = False
 
