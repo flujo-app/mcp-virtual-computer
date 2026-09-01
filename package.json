@@ -1,6 +1,6 @@
 {
   "name": "mcp-virtual-computer-build-tools",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "private": true,
   "description": "Build tooling for the mcp-virtual-computer Python package and Three.js MCP App",
   "type": "module",
