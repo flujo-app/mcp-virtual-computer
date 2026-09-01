@@ -490,6 +490,44 @@ class TestDockerBackendRunCommand:
         assert "--pids-limit=256" in cmd
 
 
+class TestDockerDesktopFirewall:
+    """Tests for live desktop network isolation."""
+
+    @pytest.mark.asyncio
+    async def test_unplug_cuts_established_internet_but_keeps_desktop(
+        self, monkeypatch
+    ) -> None:
+        backend = DockerBackend(DockerBackendConfig())
+        sandbox = DockerSandbox(
+            _DockerSandboxState(
+                engine="docker",
+                host=None,
+                shell="/bin/bash",
+                container_id="a" * 64,
+                desktop_host_port=49152,
+            )
+        )
+        calls: list[tuple[str, ...]] = []
+
+        async def fake_run(*args, **_kwargs):
+            calls.append(args)
+            return 0, b"", b""
+
+        monkeypatch.setattr(backend, "_run_docker", fake_run)
+
+        await backend._set_desktop_firewall(sandbox, False)
+
+        script = calls[0][calls[0].index("-c") + 1]
+        assert "-I INPUT 1 -j MCP_NO_NETWORK_IN" in script
+        assert "--dport 6080 -j ACCEPT" in script
+        assert "-I OUTPUT 1 -j MCP_NO_NETWORK_OUT" in script
+        assert "--sport 6080 -j ACCEPT" in script
+        assert "--reject-with tcp-reset" in script
+        assert "ss -K -H4tn state connected" in script
+        assert "not ( sport = :6080 or dst = 127.0.0.0/8 )" in script
+        assert "--ctstate ESTABLISHED" not in script
+
+
 # --- DockerSandbox tests ---
 
 

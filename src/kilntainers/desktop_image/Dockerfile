@@ -1,6 +1,6 @@
 FROM debian:bookworm-slim
 
-LABEL mcp-virtual-computer.image-version="3"
+LABEL mcp-virtual-computer.image-version="4"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     DISPLAY=:99 \
@@ -14,6 +14,7 @@ RUN apt-get update \
         dbus-x11 \
         fonts-dejavu-core \
         gir1.2-atspi-2.0 \
+        iproute2 \
         iptables \
         mousepad \
         libasound2-plugins \

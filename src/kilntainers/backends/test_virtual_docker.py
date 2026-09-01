@@ -42,6 +42,22 @@ def test_desktop_image_owns_complete_user_local_prefix() -> None:
     )
 
 
+def test_desktop_offline_firewall_cuts_existing_internet_connections() -> None:
+    """Startup isolation may preserve the local screen, not arbitrary sockets."""
+    entrypoint = (
+        files("kilntainers")
+        .joinpath("desktop_image", "start-desktop.sh")
+        .read_text(encoding="utf-8")
+    )
+
+    assert "-j MCP_NO_NETWORK_IN" in entrypoint
+    assert "--dport 6080 -j ACCEPT" in entrypoint
+    assert "-j MCP_NO_NETWORK_OUT" in entrypoint
+    assert "--sport 6080 -j ACCEPT" in entrypoint
+    assert "--reject-with tcp-reset" in entrypoint
+    assert "--ctstate ESTABLISHED" not in entrypoint
+
+
 def test_headless_computer_is_persistent_and_uses_workspace() -> None:
     backend = DockerBackend(DockerBackendConfig(network_enabled=True))
     command = backend._build_run_command(computer_id="desk", temporary=False)

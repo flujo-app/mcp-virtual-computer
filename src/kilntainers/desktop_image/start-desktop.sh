@@ -30,12 +30,22 @@ if [ "$(id -u)" = "0" ]; then
     chown computer:computer "$network_state_file"
   fi
   if [ "$(cat "$network_state_file")" = "false" ]; then
-    iptables -N MCP_NO_NETWORK 2>/dev/null || true
-    iptables -F MCP_NO_NETWORK
-    iptables -A MCP_NO_NETWORK -o lo -j ACCEPT
-    iptables -A MCP_NO_NETWORK -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    iptables -A MCP_NO_NETWORK -j REJECT
-    iptables -C OUTPUT -j MCP_NO_NETWORK 2>/dev/null || iptables -I OUTPUT 1 -j MCP_NO_NETWORK
+    iptables -N MCP_NO_NETWORK_IN 2>/dev/null || true
+    iptables -F MCP_NO_NETWORK_IN
+    iptables -A MCP_NO_NETWORK_IN -i lo -j ACCEPT
+    iptables -A MCP_NO_NETWORK_IN -p tcp --dport 6080 -j ACCEPT
+    iptables -A MCP_NO_NETWORK_IN -p tcp -j REJECT --reject-with tcp-reset
+    iptables -A MCP_NO_NETWORK_IN -j REJECT
+    iptables -N MCP_NO_NETWORK_OUT 2>/dev/null || true
+    iptables -F MCP_NO_NETWORK_OUT
+    iptables -A MCP_NO_NETWORK_OUT -o lo -j ACCEPT
+    # Preserve the host-only VNC/audio transport without allowing unrelated
+    # established internet transfers to survive unplugging the LAN cable.
+    iptables -A MCP_NO_NETWORK_OUT -p tcp --sport 6080 -j ACCEPT
+    iptables -A MCP_NO_NETWORK_OUT -p tcp -j REJECT --reject-with tcp-reset
+    iptables -A MCP_NO_NETWORK_OUT -j REJECT
+    iptables -C INPUT -j MCP_NO_NETWORK_IN 2>/dev/null || iptables -I INPUT 1 -j MCP_NO_NETWORK_IN
+    iptables -C OUTPUT -j MCP_NO_NETWORK_OUT 2>/dev/null || iptables -I OUTPUT 1 -j MCP_NO_NETWORK_OUT
     touch /run/mcp-network-disabled
   else
     rm -f /run/mcp-network-disabled

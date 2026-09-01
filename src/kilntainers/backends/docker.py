@@ -35,8 +35,9 @@ DESKTOP_LABEL = "mcp-virtual-computer.desktop"
 WORKSPACE_LABEL = "mcp-virtual-computer.workspace"
 DESKTOP_MODE_FILE = "/var/lib/mcp-virtual-computer/desktop-enabled"
 NETWORK_MODE_FILE = "/var/lib/mcp-virtual-computer/network-enabled"
+DESKTOP_CONTAINER_PORT = 6080
 DESKTOP_IMAGE_VERSION_LABEL = "mcp-virtual-computer.image-version"
-DESKTOP_IMAGE_VERSION = "3"
+DESKTOP_IMAGE_VERSION = "4"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1025,11 +1026,17 @@ class DockerBackend(Backend):
         sandbox: "DockerSandbox",
         enabled: bool,
     ) -> None:
-        """Apply the desktop image's outbound-only firewall."""
+        """Apply the desktop image's host-screen-only network firewall."""
         if enabled:
             script = (
                 "command -v iptables >/dev/null 2>&1 || exit 0; "
+                "iptables -D INPUT -j MCP_NO_NETWORK_IN 2>/dev/null || true; "
+                "iptables -D OUTPUT -j MCP_NO_NETWORK_OUT 2>/dev/null || true; "
                 "iptables -D OUTPUT -j MCP_NO_NETWORK 2>/dev/null || true; "
+                "iptables -F MCP_NO_NETWORK_IN 2>/dev/null || true; "
+                "iptables -X MCP_NO_NETWORK_IN 2>/dev/null || true; "
+                "iptables -F MCP_NO_NETWORK_OUT 2>/dev/null || true; "
+                "iptables -X MCP_NO_NETWORK_OUT 2>/dev/null || true; "
                 "iptables -F MCP_NO_NETWORK 2>/dev/null || true; "
                 "iptables -X MCP_NO_NETWORK 2>/dev/null || true; "
                 "rm -f /run/mcp-network-disabled; "
@@ -1040,14 +1047,37 @@ class DockerBackend(Backend):
             script = (
                 "command -v iptables >/dev/null 2>&1 || { "
                 "echo 'desktop image has no iptables support' >&2; exit 45; }; "
-                "iptables -N MCP_NO_NETWORK 2>/dev/null || true; "
-                "iptables -F MCP_NO_NETWORK; "
-                "iptables -A MCP_NO_NETWORK -o lo -j ACCEPT; "
-                "iptables -A MCP_NO_NETWORK -m conntrack "
-                "--ctstate ESTABLISHED,RELATED -j ACCEPT; "
-                "iptables -A MCP_NO_NETWORK -j REJECT; "
-                "iptables -C OUTPUT -j MCP_NO_NETWORK 2>/dev/null || "
-                "iptables -I OUTPUT 1 -j MCP_NO_NETWORK; "
+                "iptables -D OUTPUT -j MCP_NO_NETWORK 2>/dev/null || true; "
+                "iptables -F MCP_NO_NETWORK 2>/dev/null || true; "
+                "iptables -X MCP_NO_NETWORK 2>/dev/null || true; "
+                "iptables -D INPUT -j MCP_NO_NETWORK_IN 2>/dev/null || true; "
+                "iptables -D OUTPUT -j MCP_NO_NETWORK_OUT 2>/dev/null || true; "
+                "iptables -N MCP_NO_NETWORK_IN 2>/dev/null || true; "
+                "iptables -F MCP_NO_NETWORK_IN; "
+                "iptables -A MCP_NO_NETWORK_IN -i lo -j ACCEPT; "
+                f"iptables -A MCP_NO_NETWORK_IN -p tcp "
+                f"--dport {DESKTOP_CONTAINER_PORT} -j ACCEPT; "
+                "iptables -A MCP_NO_NETWORK_IN -p tcp -j REJECT "
+                "--reject-with tcp-reset; "
+                "iptables -A MCP_NO_NETWORK_IN -j REJECT; "
+                "iptables -N MCP_NO_NETWORK_OUT 2>/dev/null || true; "
+                "iptables -F MCP_NO_NETWORK_OUT; "
+                "iptables -A MCP_NO_NETWORK_OUT -o lo -j ACCEPT; "
+                # Keep the loopback-published desktop transport responsive,
+                # but do not exempt unrelated established internet transfers.
+                f"iptables -A MCP_NO_NETWORK_OUT -p tcp "
+                f"--sport {DESKTOP_CONTAINER_PORT} -j ACCEPT; "
+                "iptables -A MCP_NO_NETWORK_OUT -p tcp -j REJECT "
+                "--reject-with tcp-reset; "
+                "iptables -A MCP_NO_NETWORK_OUT -j REJECT; "
+                "iptables -I INPUT 1 -j MCP_NO_NETWORK_IN; "
+                "iptables -I OUTPUT 1 -j MCP_NO_NETWORK_OUT; "
+                # Destroy non-local TCP sockets so foreground downloads fail
+                # promptly instead of waiting for a long TCP retransmit timeout.
+                "command -v ss >/dev/null 2>&1 && "
+                "ss -K -H4tn state connected "
+                "'not ( sport = :6080 or dst = 127.0.0.0/8 )' "
+                ">/dev/null 2>&1 || true; "
                 "touch /run/mcp-network-disabled; "
                 f"printf 'false\\n' > {NETWORK_MODE_FILE}; "
                 f"chown computer:computer {NETWORK_MODE_FILE}"
