@@ -38,6 +38,10 @@ A VM for your agent. And for you.
 # Demo: Claude Desktop
 <img width="807" height="787" alt="image" src="https://github.com/user-attachments/assets/1a8fe86f-fab4-49aa-8740-2e06044344af" />
 
+# Demo: Goose
+<img width="1814" height="1080" alt="image" src="https://github.com/user-attachments/assets/f7965935-6579-4028-9244-6a1e75bbc8bd" />
+
+
 ## What it exposes
 
 - `terminal_execute` — run a command in the configured Docker computer.
