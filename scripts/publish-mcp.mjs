@@ -16,31 +16,31 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_REGISTRY = "https://registry.modelcontextprotocol.io";
-const PUBLISHER_VERSION = "1.8.0";
+const PUBLISHER_VERSION = "1.8.1";
 const PUBLISHER_TARGETS = {
   "win32-x64": {
     asset: "mcp-publisher_windows_amd64.tar.gz",
-    sha256: "697df4aaf7941ad6fbac9ebc48bd23ff87a3131ae7bb6ee0543cb857d8029939",
+    sha256: "399ad0d6e00a50812b563a71d8bfbff5160c085e6b13aac6ec083d98d5ff7c45",
   },
   "win32-arm64": {
     asset: "mcp-publisher_windows_arm64.tar.gz",
-    sha256: "21377f392433ec46ec4b5623a1bf72ba9e85b7849319a01f4768ab465b92fad2",
+    sha256: "2e3a3435e27afcaa35bec9cb573bab99db9e980d7fb49f90f32a59d03d4a3fa3",
   },
   "linux-x64": {
     asset: "mcp-publisher_linux_amd64.tar.gz",
-    sha256: "1370446bbe74d562608e8005a6ccce02d146a661fbd78674e11cc70b9618d6cf",
+    sha256: "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc",
   },
   "linux-arm64": {
     asset: "mcp-publisher_linux_arm64.tar.gz",
-    sha256: "c978982c60e1b4903a976de090f04dc4fac4a320daa50704fcad2dbc93433d62",
+    sha256: "8dd75a6cf6845688b5d4e46df58d3ca26d5c8d233bb0626606e1db82c5e883e4",
   },
   "darwin-x64": {
     asset: "mcp-publisher_darwin_amd64.tar.gz",
-    sha256: "5350f756e8408d0e22802b7f384af941448358b503eb1e1772979a61b9b99fde",
+    sha256: "88126981225e7714fcc6b7a10cdba4a80ae5901e9740a8c06d0d5195c8bc294c",
   },
   "darwin-arm64": {
     asset: "mcp-publisher_darwin_arm64.tar.gz",
-    sha256: "e74f8846c3b5d0428cfeae3f9f520bbf9031d18e68224108c3760d60b6aaf2e0",
+    sha256: "e45e520892460732a4bdf37255576415d4a53ec171f8b913faf15bb1aef7cb77",
   },
 };
 const LOGIN_METHODS = ["github", "github-oidc", "dns", "http", "none"];
