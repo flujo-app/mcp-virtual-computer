@@ -127,6 +127,12 @@ function verifyMetadata() {
   const problems = [];
   const distribution = "mcp-virtual-computer";
   const marker = `mcp-name: ${serverName}`;
+  const expectedEnvironmentDefaults = {
+    COMPUTER_ID: "agent-workstation",
+    DESKTOP_ENVIRONMENT: "false",
+    NETWORK_ACCESS: "true",
+    AUTO_INSTALL_DOCKER: "true",
+  };
   if (server.version !== version) {
     problems.push(`server.json version does not match package.json ${version}`);
   }
@@ -144,6 +150,19 @@ function verifyMetadata() {
     if (entry.version !== version) {
       problems.push(`PyPI entry must use version ${version}`);
     }
+    const environment = new Map(
+      (entry.environmentVariables ?? []).map((item) => [item.name, item]),
+    );
+    for (const [name, expectedDefault] of Object.entries(
+      expectedEnvironmentDefaults,
+    )) {
+      if (environment.get(name)?.default !== expectedDefault) {
+        problems.push(`${name} must default to ${expectedDefault}`);
+      }
+    }
+  }
+  if (!(server.icons ?? []).some((icon) => icon.mimeType === "image/png")) {
+    problems.push("server.json must declare a PNG icon");
   }
   if (!serverName.startsWith("io.github.flujo-app/")) {
     problems.push("GitHub authentication requires the io.github.flujo-app/ namespace");

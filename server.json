@@ -3,7 +3,17 @@
   "name": "io.github.flujo-app/mcp-virtual-computer",
   "title": "MCP Virtual Computer",
   "description": "A persistent Docker computer rendered as a Three.js laptop, with an optional live Xfce desktop.",
-  "version": "0.2.3",
+  "version": "0.2.4",
+  "websiteUrl": "https://github.com/flujo-app/mcp-virtual-computer",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/flujo-app/mcp-virtual-computer/main/assets/mcp-virtual-computer.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    }
+  ],
   "repository": {
     "url": "https://github.com/flujo-app/mcp-virtual-computer",
     "source": "github"
@@ -13,11 +23,58 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "mcp-virtual-computer",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
-      }
+      },
+      "environmentVariables": [
+        {
+          "name": "COMPUTER_ID",
+          "description": "Stable identity of the one persistent Docker computer.",
+          "default": "agent-workstation",
+          "placeholder": "agent-workstation",
+          "format": "string",
+          "isRequired": true,
+          "isSecret": false
+        },
+        {
+          "name": "DESKTOP_ENVIRONMENT",
+          "description": "Start the real Xfce desktop instead of the virtual desktop.",
+          "default": "false",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "format": "boolean",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "NETWORK_ACCESS",
+          "description": "Allow outbound network access from the Docker computer.",
+          "default": "true",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "format": "boolean",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "AUTO_INSTALL_DOCKER",
+          "description": "On Windows, install and start Docker Desktop lazily when needed.",
+          "default": "true",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "format": "boolean",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
     }
   ]
 }
