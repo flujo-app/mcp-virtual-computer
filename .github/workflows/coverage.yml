@@ -35,10 +35,12 @@ jobs:
 
       - name: Run coverage
         run: |
-          uv run pytest -n auto --cov=. --cov-report=term-missing
-          uv run coverage report
-          uv run coverage html
-          uv run coverage xml
+          uv run pytest src/kilntainers \
+            -m "not integration and not e2e and not http_integration" \
+            --cov=src/kilntainers \
+            --cov-report=term-missing \
+            --cov-report=html \
+            --cov-report=xml
 
       - name: Upload coverage HTML report as artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

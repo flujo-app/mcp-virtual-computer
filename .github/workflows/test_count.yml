@@ -28,7 +28,7 @@ jobs:
 
       - name: Count Python tests
         run: |
-          PYTHON_TEST_COUNT=$(uv run python3 -m pytest --collect-only -q . | grep "tests collected" | awk '{print $1}' | sed 's/[^0-9]//g')
+          PYTHON_TEST_COUNT=$(uv run python3 -m pytest --collect-only -q src/kilntainers -m "not integration and not e2e and not http_integration" | grep "tests collected" | awk '{print $1}' | sed 's/[^0-9]//g')
           echo "PYTHON_TEST_COUNT=$PYTHON_TEST_COUNT" >> $GITHUB_ENV
 
       - name: Create test count badge

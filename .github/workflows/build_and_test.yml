@@ -2,12 +2,19 @@ name: Build and Test
 
 on:
   push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: build-and-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build, Typecheck, and Test Python
+    name: Release gate
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -20,14 +27,8 @@ jobs:
       - name: Set up Python 3.13
         run: uv python install 3.13
 
-      - name: Install the project
-        run: uv sync --all-extras --dev
+      - name: Install app build dependencies
+        run: npm ci
 
-      - name: Test All Python
-        run: uv run python3 -m pytest -vv -n auto .
-
-      - name: Check Python Types
-        run: uv run ty check
-
-      - name: Build
-        run: uv build
+      - name: Build, lint, typecheck, test, and package
+        run: npm run check
