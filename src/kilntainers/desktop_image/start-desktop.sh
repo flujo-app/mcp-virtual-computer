@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+
 desktop_state_dir=/var/lib/mcp-virtual-computer
 desktop_state_file=$desktop_state_dir/desktop-enabled
 network_state_file=$desktop_state_dir/network-enabled
@@ -55,6 +58,8 @@ if [ "$(id -u)" = "0" ]; then
     USER=computer \
     LOGNAME=computer \
     DISPLAY="${DISPLAY:-:99}" \
+    LANG="$LANG" \
+    LC_ALL="$LC_ALL" \
     NO_AT_BRIDGE=0 \
     GTK_MODULES=atk-bridge \
     XDG_CONFIG_HOME=/home/computer/.config \
@@ -158,7 +163,7 @@ start_xfce() {
     return
   fi
   setsid dbus-run-session -- sh -lc '
-    export DISPLAY=:99 NO_AT_BRIDGE=0 GTK_MODULES=atk-bridge
+    export DISPLAY=:99 LANG="${LANG:-C.UTF-8}" LC_ALL="${LC_ALL:-C.UTF-8}" NO_AT_BRIDGE=0 GTK_MODULES=atk-bridge
     python3 -c "from gi.repository import Gio; settings = Gio.Settings.new(\"org.gnome.desktop.interface\"); settings.set_boolean(\"toolkit-accessibility\", True); Gio.Settings.sync()"
     exec startxfce4
   ' &

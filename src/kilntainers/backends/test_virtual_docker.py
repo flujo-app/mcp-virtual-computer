@@ -42,6 +42,23 @@ def test_desktop_image_owns_complete_user_local_prefix() -> None:
     )
 
 
+def test_desktop_image_configures_utf8_and_emoji_fallback() -> None:
+    """Interactive terminal applications must receive a real UTF-8 locale."""
+    image_files = files("kilntainers").joinpath("desktop_image")
+    dockerfile = image_files.joinpath("Dockerfile").read_text(encoding="utf-8")
+    entrypoint_path = image_files.joinpath("start-desktop.sh")
+    entrypoint = entrypoint_path.read_text(encoding="utf-8")
+
+    assert "LANG=C.UTF-8" in dockerfile
+    assert "LC_ALL=C.UTF-8" in dockerfile
+    assert "fonts-noto-color-emoji" in dockerfile
+    assert b"\r\n" not in entrypoint_path.read_bytes()
+    assert 'export LANG="${LANG:-C.UTF-8}"' in entrypoint
+    assert 'export LC_ALL="${LC_ALL:-C.UTF-8}"' in entrypoint
+    assert 'LANG="$LANG" \\' in entrypoint
+    assert 'LC_ALL="$LC_ALL" \\' in entrypoint
+
+
 def test_desktop_offline_firewall_cuts_existing_internet_connections() -> None:
     """Startup isolation may preserve the local screen, not arbitrary sockets."""
     entrypoint = (

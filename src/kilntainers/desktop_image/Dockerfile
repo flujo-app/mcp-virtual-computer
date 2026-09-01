@@ -1,9 +1,11 @@
 FROM debian:bookworm-slim
 
-LABEL mcp-virtual-computer.image-version="4"
+LABEL mcp-virtual-computer.image-version="5"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     DISPLAY=:99 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
     NO_AT_BRIDGE=0 \
     GTK_MODULES=atk-bridge
 
@@ -13,6 +15,7 @@ RUN apt-get update \
         ca-certificates \
         dbus-x11 \
         fonts-dejavu-core \
+        fonts-noto-color-emoji \
         gir1.2-atspi-2.0 \
         iproute2 \
         iptables \

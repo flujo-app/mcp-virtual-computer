@@ -37,7 +37,7 @@ DESKTOP_MODE_FILE = "/var/lib/mcp-virtual-computer/desktop-enabled"
 NETWORK_MODE_FILE = "/var/lib/mcp-virtual-computer/network-enabled"
 DESKTOP_CONTAINER_PORT = 6080
 DESKTOP_IMAGE_VERSION_LABEL = "mcp-virtual-computer.image-version"
-DESKTOP_IMAGE_VERSION = "4"
+DESKTOP_IMAGE_VERSION = "5"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
