@@ -1,6 +1,6 @@
 [project]
 name = "mcp-virtual-computer"
-version = "0.2.10"
+version = "0.2.11"
 description = "A persistent Docker or Fly computer with a cinematic Three.js MCP App"
 authors = [
   {name = "Steve Cosman, Chesterfield Laboratories Inc", email = "scosman@users.noreply.github.com"}

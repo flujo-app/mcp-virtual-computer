@@ -3,7 +3,7 @@
   "name": "io.github.flujo-app/mcp-virtual-computer",
   "title": "MCP Virtual Computer",
   "description": "A persistent Docker or Fly computer with a Three.js interface and optional live Xfce desktop.",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "websiteUrl": "https://github.com/flujo-app/mcp-virtual-computer",
   "icons": [
     {
@@ -23,7 +23,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "mcp-virtual-computer",
-      "version": "0.2.10",
+      "version": "0.2.11",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
