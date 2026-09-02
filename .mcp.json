@@ -1,18 +1,21 @@
 {
   "mcpServers": {
-    "hooks_mcp": {
+    "virtual-computer-fly": {
       "type": "stdio",
-      "command": "uvx",
+      "command": "uv",
       "args": [
-        "hooks-mcp"
+        "run",
+        "mcp-virtual-computer",
+        "--backend",
+        "fly"
       ],
-      "env": {}
-    },
-    "kilntainers": {
-      "type": "stdio",
-      "command": "kilntainers",
-      "args": [],
-      "env": {}
+      "env": {
+        "COMPUTER_ID": "agent-workstation",
+        "DESKTOP_ENVIRONMENT": "true",
+        "NETWORK_ACCESS": "true",
+        "AUTO_INSTALL_FLYCTL": "true",
+        "EXPOSE_LIFECYCLE_TOOLS": "false"
+      }
     }
   }
 }

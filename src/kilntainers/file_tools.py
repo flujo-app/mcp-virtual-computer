@@ -1,4 +1,4 @@
-"""Text file operations executed inside the persistent Docker computer."""
+"""Text file operations executed inside the persistent computer."""
 
 import base64
 import binascii

@@ -697,8 +697,8 @@ def terminal_execute(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Working directory '{working_directory}' does not exist.")
     timeout = max(1, int(payload.get("timeout") or 120))
 
-    # Multiple MCP server processes can attach to the same persistent Docker
-    # computer. A Linux file lock makes terminal creation and command dispatch
+    # Multiple MCP server processes can attach to the same persistent computer.
+    # A Linux file lock makes terminal creation and command dispatch
     # one cross-process critical section, so they still share exactly one window.
     import fcntl
 

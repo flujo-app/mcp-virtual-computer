@@ -11,9 +11,11 @@ A VM for your agent. And for you.
 - copy and paste text between the host browser and the Xfce desktop
 - model can use terminal, create/read/edit files, see the screen, click, type
 - little fun thing: if either you or the llm types text, you see that on the keyboard; if one uses the cursor, you see the mouse move on the table.
-- auto installs docker and all prerequresits (hopefully)
+- automatically installs Docker Desktop on Windows for local mode, or flyctl for Fly mode
 
 ## MCP client example
+
+### Local Docker (default)
 
 ```json
 {
@@ -41,10 +43,47 @@ A VM for your agent. And for you.
 # Demo: Goose
 <img width="1814" height="1080" alt="image" src="https://github.com/user-attachments/assets/f7965935-6579-4028-9244-6a1e75bbc8bd" />
 
+### Permanent Fly Machine
+
+Fly mode builds the bundled Xfce image with Fly's remote builder and deploys it as one permanent Machine. The root filesystem and `/workspace` survive MCP restarts, and the Three.js screen uses the same noVNC desktop through Fly's HTTPS/WebSocket proxy.
+
+This is the Xfce framebuffer returned by `look_at_screen` from a deployed Fly Machine. The same live desktop appears on the rendered computer after `computer_ui` connects to VNC:
+
+![Xfce desktop running on a permanent Fly Machine](assets/fly-xfce-desktop.png)
+
+No app name, region, CPU size, memory size, Docker installation, or VNC configuration is required:
+
+```json
+{
+  "mcpServers": {
+    "virtual-computer-fly": {
+      "command": "uvx",
+      "args": ["mcp-virtual-computer", "--backend", "fly"],
+      "env": {
+        "COMPUTER_ID": "agent-workstation",
+        "DESKTOP_ENVIRONMENT": "true",
+        "NETWORK_ACCESS": "true",
+        "AUTO_INSTALL_FLYCTL": "true",
+        "EXPOSE_LIFECYCLE_TOOLS": "false"
+      }
+    }
+  }
+}
+```
+
+The copy-paste client entry above is also available in [`.mcp.json`](.mcp.json). The package's MCP Registry declaration, including the `docker` and `fly` backend choices, is in [`server.json`](server.json). See [Fly setup](FLY_SETUP.md) for the complete first-run and authentication flow.
+
+On first use, virtual-computer finds `fly`/`flyctl` or downloads the current official release to `~/.fly/bin`. It uses a cached `fly auth login` session or `FLY_API_TOKEN`, selects the personal organization when available, creates and remembers a generated app, lets Fly choose the closest placement, and defaults to one shared CPU with 1 GB RAM.
+
+Authentication is the only unavoidable account step. On a fresh machine, start the MCP once, run the exact `flyctl auth login` command shown by its error, and restart the MCP client. The first computer call can take several minutes while Fly remotely builds Xfce. Later starts attach to the same Machine.
+
+The VNC and audio WebSockets are exposed only at a random per-Machine path stored in private Fly Machine metadata; the browser connects through the MCP server's loopback proxy and never receives that upstream URL. Fly allocates a free shared IPv4 and public IPv6 route for this protected transport.
+
+Optional overrides remain available as `FLY_ORG`, `FLY_APP_NAME`, `FLY_REGION`, `FLY_API_TOKEN`, and the `--fly-*` flags. Set `AUTO_INSTALL_FLYCTL=false` to require a preinstalled CLI. Deleting or factory-resetting the computer destroys its persistent Fly root filesystem; ordinary MCP shutdown leaves the permanent Machine running. Stop or delete it from Fly when you no longer want it to incur usage.
 
 ## What it exposes
 
-- `terminal_execute` — run a command in the configured Docker computer.
+- `terminal_execute` — run a command in the configured Docker container or Fly Machine.
 - `read_file` — read a UTF-8 text file relative to `/workspace` or by absolute path.
 - `write_file` — atomically write a UTF-8 text file.
 - `edit_file` — replace one exact text match, or all matches when requested.
@@ -66,4 +105,4 @@ The MCP App can always call `runtime_status`, `set_network_access`, and `set_des
   
 ## License and origin
 
-MIT licensed. This project is a Docker-only fork of [Kilntainers](https://github.com/Kiln-AI/Kilntainers).
+MIT licensed. This project is a persistent-computer fork of [Kilntainers](https://github.com/Kiln-AI/Kilntainers) with Docker and Fly backends.

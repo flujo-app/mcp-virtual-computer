@@ -6,11 +6,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
+import os
 import struct
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 MAX_HTTP_HEADER = 16_384
 MAX_FRAME = 16 * 1024 * 1024
+VNC_PATH_TOKEN = os.getenv("VNC_PATH_TOKEN", "").strip()
 
 
 async def read_http_request(
@@ -58,6 +61,20 @@ async def handshake(
     writer.write(b"\r\n".join(response) + b"\r\n\r\n")
     await writer.drain()
     return path
+
+
+def authorized_channel(path: str) -> str | None:
+    """Return the requested channel only when its optional path token matches."""
+    pieces = [piece for piece in path.split("/") if piece]
+    if VNC_PATH_TOKEN:
+        if len(pieces) != 2 or not hmac.compare_digest(pieces[0], VNC_PATH_TOKEN):
+            return None
+        channel = pieces[1]
+    else:
+        if len(pieces) != 1:
+            return None
+        channel = pieces[0]
+    return channel if channel in {"websockify", "audio"} else None
 
 
 async def read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
@@ -178,7 +195,10 @@ async def proxy(
     tcp_writer: asyncio.StreamWriter | None = None
     try:
         path = await handshake(websocket_reader, websocket_writer)
-        if path == "/audio":
+        channel = authorized_channel(path)
+        if channel is None:
+            raise ValueError("invalid websocket path")
+        if channel == "audio":
             await audio_proxy(websocket_reader, websocket_writer)
             return
         tcp_reader, tcp_writer = await asyncio.open_connection("127.0.0.1", 5900)

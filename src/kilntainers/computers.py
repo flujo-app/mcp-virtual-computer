@@ -187,7 +187,7 @@ class ComputerRegistry:
                     record.owners += 1
                 return requested_id, record.sandbox
 
-            # Separate stdio/HTTP MCP processes can share one persistent Docker
+            # Separate stdio/HTTP MCP processes can share one persistent
             # computer. Serialize provider discovery and creation so a cold
             # start cannot race into duplicate creates or conflicting startup
             # mutations.

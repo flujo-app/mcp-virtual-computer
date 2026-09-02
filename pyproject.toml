@@ -1,7 +1,7 @@
 [project]
 name = "mcp-virtual-computer"
 version = "0.2.9"
-description = "A persistent Docker computer with a cinematic Three.js MCP App"
+description = "A persistent Docker or Fly computer with a cinematic Three.js MCP App"
 authors = [
   {name = "Steve Cosman, Chesterfield Laboratories Inc", email = "scosman@users.noreply.github.com"}
 ]
@@ -11,7 +11,11 @@ classifiers = [
 ]
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["mcp>=1.26.0,<2", "websockets>=15.0.1,<16"]
+dependencies = [
+  "certifi>=2026.1.4",
+  "mcp>=1.26.0,<2",
+  "websockets>=15.0.1,<16",
+]
 
 [project.urls]
 Homepage = "https://github.com/flujo-app/mcp-virtual-computer"
@@ -26,6 +30,7 @@ mcp-virtual-computer = "kilntainers.cli:main"
 
 [project.entry-points."kilntainers.backends"]
 docker = "kilntainers.backends.docker:DockerBackend"
+fly = "kilntainers.backends.fly:FlyBackend"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kilntainers"]

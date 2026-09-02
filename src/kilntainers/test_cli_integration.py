@@ -39,9 +39,10 @@ class TestCLIStartup:
         assert "core options" in help_text.lower()
         assert "tool description" in help_text.lower()
         assert "docker backend options" in help_text.lower()
+        assert "fly backend options" in help_text.lower()
 
         # Check for key arguments
-        assert "--backend" not in help_text
+        assert "--backend" in help_text
         assert "--transport" in help_text
         assert "--timeout" in help_text
         assert "--engine" in help_text
@@ -76,7 +77,7 @@ class TestCLIValidation:
     """Tests for CLI validation behavior."""
 
     def test_cli_rejects_removed_backend_argument(self):
-        """The Docker-only CLI rejects the removed backend option."""
+        """The CLI rejects a backend option that no longer exists."""
         result = subprocess.run(
             [sys.executable, "-m", "kilntainers", "--backend", "invalid"],
             capture_output=True,

@@ -33,8 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mcp-virtual-computer",
         description=(
-            "MCP server providing one persistent, visually rendered local "
-            "Docker computer for LLM agents."
+            "MCP server providing one persistent, visually rendered local or "
+            "Fly-hosted computer for LLM agents."
         ),
         usage="%(prog)s [-h] [--transport {stdio,http}] [...]",
     )
@@ -44,6 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- Core parameters ---
     core = parser.add_argument_group("core options")
+    core.add_argument(
+        "--backend",
+        choices=available_backends,
+        default=os.getenv("BACKEND", "docker"),
+        help="Computer backend (default: BACKEND or docker)",
+    )
     core.add_argument(
         "--transport",
         default="stdio",
@@ -178,7 +184,7 @@ def build_configs(
     )
 
     # Delegate backend config construction to the backend class
-    backend_cls = get_backend_class("docker")
+    backend_cls = get_backend_class(args.backend)
     backend_config = backend_cls.config_from_args(args)
 
     return server_config, backend_config
@@ -350,7 +356,7 @@ def main() -> None:
     validate_config(server_config)
 
     # Create backend (validation happens lazily on first terminal_execute)
-    backend_name = "docker"
+    backend_name = args.backend
     backend_class = get_backend_class(backend_name)
     backend_class.prepare_runtime()
     backend = backend_class(backend_config)

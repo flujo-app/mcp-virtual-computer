@@ -703,7 +703,7 @@ def test_help_output_structure():
     assert "docker backend options" in help_text.lower()
 
     # Check for key arguments
-    assert "--backend" not in help_text
+    assert "--backend" in help_text
     assert "--transport" in help_text
     assert "--timeout" in help_text
     assert "--engine" in help_text
@@ -711,9 +711,11 @@ def test_help_output_structure():
     assert "--docker-run-flag" in help_text
 
 
-def test_only_docker_backend_is_exposed():
+def test_docker_and_fly_backends_are_exposed():
     from kilntainers.backends import get_available_backend_names, get_backend_class
 
-    assert get_available_backend_names() == ["docker"]
-    with pytest.raises(KeyError, match="Available backends: docker"):
+    assert get_available_backend_names() == ["docker", "fly"]
+    assert get_backend_class("docker").__name__ == "DockerBackend"
+    assert get_backend_class("fly").__name__ == "FlyBackend"
+    with pytest.raises(KeyError, match="Available backends: docker, fly"):
         get_backend_class("modal")

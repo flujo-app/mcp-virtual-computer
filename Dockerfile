@@ -4,8 +4,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# The server manages its one persistent workstation through a mounted Docker
-# socket. No cloud-machine clients are included in this local-only image.
+# Docker mode talks to a mounted host socket. Fly mode downloads flyctl lazily
+# when selected, so the image does not pin a second copy of the CLI.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates docker.io \
     && rm -rf /var/lib/apt/lists/*

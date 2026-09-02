@@ -1287,7 +1287,7 @@ def create_server(
     async def set_network_access(
         enabled: Annotated[
             bool,
-            Field(description="Whether the Docker computer may access the network."),
+            Field(description="Whether the computer may access the network."),
         ],
         ctx: Context[ServerSession, SessionContext] | None = None,
     ) -> CallToolResult:
@@ -1320,7 +1320,7 @@ def create_server(
         ],
         ctx: Context[ServerSession, SessionContext] | None = None,
     ) -> CallToolResult:
-        """Switch the same Docker computer between virtual and real desktops."""
+        """Switch the same computer between virtual and real desktops."""
         session = _session_from_context(ctx)
         if session is None:
             return _result({"error": "Internal error: no context provided"}, is_error=True)
@@ -1360,7 +1360,7 @@ def create_server(
     mcp.add_tool(
         set_network_access,
         name="set_network_access",
-        description="Change the running Docker computer's real network access.",
+        description="Change the running computer's real network access.",
         meta=lifecycle_meta,
     )
     mcp.add_tool(

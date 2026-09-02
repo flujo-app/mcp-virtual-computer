@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.flujo-app/mcp-virtual-computer",
   "title": "MCP Virtual Computer",
-  "description": "A persistent Docker computer rendered as a Three.js laptop, with an optional live Xfce desktop.",
+  "description": "A persistent Docker or Fly computer rendered as a Three.js laptop, with an optional live Xfce desktop.",
   "version": "0.2.9",
   "websiteUrl": "https://github.com/flujo-app/mcp-virtual-computer",
   "icons": [
@@ -30,8 +30,20 @@
       },
       "environmentVariables": [
         {
+          "name": "BACKEND",
+          "description": "Computer provider. Use docker for a local container or fly for a permanent Fly Machine.",
+          "default": "docker",
+          "choices": [
+            "docker",
+            "fly"
+          ],
+          "format": "string",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
           "name": "COMPUTER_ID",
-          "description": "Stable identity of the one persistent Docker computer.",
+          "description": "Stable identity of the one persistent computer.",
           "default": "agent-workstation",
           "placeholder": "agent-workstation",
           "format": "string",
@@ -52,7 +64,7 @@
         },
         {
           "name": "NETWORK_ACCESS",
-          "description": "Allow outbound network access from the Docker computer.",
+          "description": "Allow outbound network access from the computer.",
           "default": "true",
           "choices": [
             "false",
@@ -73,6 +85,25 @@
           "format": "boolean",
           "isRequired": false,
           "isSecret": false
+        },
+        {
+          "name": "AUTO_INSTALL_FLYCTL",
+          "description": "Download flyctl into the user profile when it is missing.",
+          "default": "true",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "format": "boolean",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "FLY_API_TOKEN",
+          "description": "Optional Fly API token. A cached flyctl login is also supported.",
+          "format": "string",
+          "isRequired": false,
+          "isSecret": true
         },
         {
           "name": "EXPOSE_LIFECYCLE_TOOLS",
