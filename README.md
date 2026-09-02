@@ -34,25 +34,9 @@ A VM for your agent. And for you.
   }
 }
 ```
-# Demo: FLUJO
-<img width="1804" height="996" alt="image" src="https://github.com/user-attachments/assets/b4b53c25-1520-4a23-9a10-03b4f4132cd5" />
 
-# Demo: Claude Desktop
-<img width="807" height="787" alt="image" src="https://github.com/user-attachments/assets/1a8fe86f-fab4-49aa-8740-2e06044344af" />
-
-# Demo: Goose
-<img width="1814" height="1080" alt="image" src="https://github.com/user-attachments/assets/f7965935-6579-4028-9244-6a1e75bbc8bd" />
-
-### Permanent Fly Machine
-
-Fly mode builds the bundled Xfce image with Fly's remote builder and deploys it as one permanent Machine. The root filesystem and `/workspace` survive MCP restarts, and the Three.js screen uses the same noVNC desktop through Fly's HTTPS/WebSocket proxy.
-
-This is the Xfce framebuffer returned by `look_at_screen` from a deployed Fly Machine. The same live desktop appears on the rendered computer after `computer_ui` connects to VNC:
-
-![Xfce desktop running on a permanent Fly Machine](assets/fly-xfce-desktop.png)
-
-No app name, region, CPU size, memory size, Docker installation, or VNC configuration is required:
-
+### Fly.io Machine
+On a fresh machine, start the MCP once, run the exact `flyctl auth login` command shown by its error, and restart the MCP client
 ```json
 {
   "mcpServers": {
@@ -71,15 +55,7 @@ No app name, region, CPU size, memory size, Docker installation, or VNC configur
 }
 ```
 
-The copy-paste client entry above is also available in [`.mcp.json`](.mcp.json). The package's MCP Registry declaration, including the `docker` and `fly` backend choices, is in [`server.json`](server.json). See [Fly setup](FLY_SETUP.md) for the complete first-run and authentication flow.
 
-On first use, virtual-computer finds `fly`/`flyctl` or downloads the current official release to `~/.fly/bin`. It uses a cached `fly auth login` session or `FLY_API_TOKEN`, selects the personal organization when available, creates and remembers a generated app, lets Fly choose the closest placement, and defaults to one shared CPU with 1 GB RAM.
-
-Authentication is the only unavoidable account step. On a fresh machine, start the MCP once, run the exact `flyctl auth login` command shown by its error, and restart the MCP client. The first computer call can take several minutes while Fly remotely builds Xfce. Later starts attach to the same Machine.
-
-The VNC and audio WebSockets are exposed only at a random per-Machine path stored in private Fly Machine metadata; the browser connects through the MCP server's loopback proxy and never receives that upstream URL. Fly allocates a free shared IPv4 and public IPv6 route for this protected transport.
-
-Optional overrides remain available as `FLY_ORG`, `FLY_APP_NAME`, `FLY_REGION`, `FLY_API_TOKEN`, and the `--fly-*` flags. Set `AUTO_INSTALL_FLYCTL=false` to require a preinstalled CLI. Deleting or factory-resetting the computer destroys its persistent Fly root filesystem; ordinary MCP shutdown leaves the permanent Machine running. Stop or delete it from Fly when you no longer want it to incur usage.
 
 ## What it exposes
 
@@ -103,6 +79,36 @@ additionally exposes:
 
 The MCP App can always call `runtime_status`, `set_network_access`, and `set_desktop_environment`. Set `EXPOSE_LIFECYCLE_TOOLS=true` to additionally expose those lifecycle controls to the model; they remain model-hidden by default.
   
+## Architecture
+<img width="1800" height="1040" alt="image" src="https://github.com/user-attachments/assets/acfa2e14-f5ec-4d88-9efe-fa92e0dd2a9a" />
+
+
+## Demo: FLUJO
+<img width="1804" height="996" alt="image" src="https://github.com/user-attachments/assets/b4b53c25-1520-4a23-9a10-03b4f4132cd5" />
+
+## Demo: Claude Desktop
+<img width="807" height="787" alt="image" src="https://github.com/user-attachments/assets/1a8fe86f-fab4-49aa-8740-2e06044344af" />
+
+## Demo: Goose
+<img width="1814" height="1080" alt="image" src="https://github.com/user-attachments/assets/f7965935-6579-4028-9244-6a1e75bbc8bd" />
+
+## Permanent Fly Machine
+
+Fly mode builds the bundled Xfce image with Fly's remote builder and deploys it as one permanent Machine. The root filesystem and `/workspace` survive MCP restarts, and the Three.js screen uses the same noVNC desktop through Fly's HTTPS/WebSocket proxy.
+
+This is the Xfce framebuffer returned by `look_at_screen` from a deployed Fly Machine. The same live desktop appears on the rendered computer after `computer_ui` connects to VNC:
+
+![Xfce desktop running on a permanent Fly Machine](assets/fly-xfce-desktop.png)
+
+No app name, region, CPU size, memory size, Docker installation, or VNC configuration is required.
+The package's MCP Registry declaration, including the `docker` and `fly` backend choices, is in [`server.json`](server.json). See [Fly setup](FLY_SETUP.md) for the complete first-run and authentication flow.
+
+On first use, virtual-computer finds `fly`/`flyctl` or downloads the current official release to `~/.fly/bin`. It uses a cached `fly auth login` session or `FLY_API_TOKEN`, selects the personal organization when available, creates and remembers a generated app, lets Fly choose the closest placement, and defaults to one shared CPU with 1 GB RAM.
+
+Authentication is the only unavoidable account step. On a fresh machine, start the MCP once, run the exact `flyctl auth login` command shown by its error, and restart the MCP client. The first computer call can take several minutes while Fly remotely builds Xfce. Later starts attach to the same Machine.
+
+Optional overrides remain available as `FLY_ORG`, `FLY_APP_NAME`, `FLY_REGION`, `FLY_API_TOKEN`, and the `--fly-*` flags. Set `AUTO_INSTALL_FLYCTL=false` to require a preinstalled CLI. Deleting or factory-resetting the computer destroys its persistent Fly root filesystem; ordinary MCP shutdown leaves the permanent Machine running. Stop or delete it from Fly when you no longer want it to incur usage.
+
 ## License and origin
 
 MIT licensed. This project is a persistent-computer fork of [Kilntainers](https://github.com/Kiln-AI/Kilntainers) with Docker and Fly backends.
