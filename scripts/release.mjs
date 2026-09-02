@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Cut a PyPI and GitHub release while keeping the familiar `npm run release`
 // interface used by sibling FLUJO projects. npm is only the task runner; a
-// dedicated GitHub Actions workflow publishes through PyPI Trusted Publishing.
+// dedicated GitHub Actions workflow publishes through its encrypted PyPI token.
 //
 //   npm run release                 patch bump
 //   npm run release minor           minor bump
@@ -74,7 +74,7 @@ if (existing) fail(`${distribution} ${next} already exists on PyPI`);
 runNpm(["run", "check"]);
 if (dryRun) {
   console.log(
-    `\nDry run passed. Would create v${next}, push main and its tag, then dispatch GitHub Trusted Publishing for ${distribution} ${next}.`,
+    `\nDry run passed. Would create v${next}, push main and its tag, then dispatch the GitHub release workflow for ${distribution} ${next}.`,
   );
   process.exit(0);
 }
@@ -163,7 +163,7 @@ async function waitForPypi(version) {
 }
 
 async function waitForWorkflow(sha) {
-  console.log("\nWaiting for the Trusted Publishing workflow ...");
+  console.log("\nWaiting for the PyPI release workflow ...");
   for (let attempt = 0; attempt < 24; attempt += 1) {
     const result = spawnSync(
       "gh",
@@ -192,7 +192,7 @@ async function waitForWorkflow(sha) {
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }
   fail(
-    `Trusted Publishing did not start; inspect https://github.com/${repository}/actions/workflows/${releaseWorkflow}`,
+    `The PyPI release workflow did not start; inspect https://github.com/${repository}/actions/workflows/${releaseWorkflow}`,
   );
 }
 
