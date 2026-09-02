@@ -5,10 +5,12 @@ import base64
 import json
 import os
 import signal
+import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncContextManager, cast
 
+import certifi
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 from mcp.types import CallToolResult, ImageContent, TextContent
@@ -324,6 +326,24 @@ def _computer_desktop_proxy_url(config: ServerConfig) -> str:
     elif ":" in host and not host.startswith("["):
         host = f"[{host}]"
     return f"ws://{host}:{config.port}/desktop/websockify"
+
+
+def _connect_desktop_websocket(
+    target: str,
+    offered_protocols: list[Subprotocol],
+) -> Any:
+    """Connect to a desktop stream, using certifi for remote TLS endpoints."""
+    tls_context = (
+        ssl.create_default_context(cafile=certifi.where())
+        if target.startswith("wss://")
+        else None
+    )
+    return connect_websocket(
+        target,
+        ssl=tls_context,
+        subprotocols=offered_protocols or None,
+        max_size=None,
+    )
 
 
 def _session_from_context(
@@ -1024,10 +1044,9 @@ def create_server(
             if item.strip()
         ]
         try:
-            async with connect_websocket(
+            async with _connect_desktop_websocket(
                 target,
-                subprotocols=offered_protocols or None,
-                max_size=None,
+                offered_protocols,
             ) as upstream:
                 await websocket.accept(subprotocol=upstream.subprotocol)
 

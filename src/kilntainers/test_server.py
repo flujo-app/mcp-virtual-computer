@@ -7,7 +7,9 @@ import signal
 from typing import cast
 from unittest.mock import MagicMock
 
+import certifi
 import pytest
+from websockets.typing import Subprotocol
 
 from kilntainers.backends.base import ExecResult
 from kilntainers.backends.test_utils import MockBackend, MockSandbox
@@ -17,6 +19,7 @@ from kilntainers.server import (
     SessionContext,
     _computer_desktop_proxy_url,
     _computer_ui_url,
+    _connect_desktop_websocket,
     _create_handler,
     assemble_tool_description,
     create_lifespan,
@@ -53,6 +56,66 @@ def test_computer_desktop_proxy_url_uses_exact_server_port() -> None:
         _computer_desktop_proxy_url(config)
         == "ws://127.0.0.1:43123/desktop/websockify"
     )
+
+
+def test_desktop_websocket_uses_certifi_for_remote_tls(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    expected_connection = object()
+    expected_context = object()
+
+    def fake_create_default_context(*, cafile: str) -> object:
+        captured["cafile"] = cafile
+        return expected_context
+
+    def fake_connect(target: str, **options: object) -> object:
+        captured["target"] = target
+        captured["options"] = options
+        return expected_connection
+
+    monkeypatch.setattr(
+        "kilntainers.server.ssl.create_default_context",
+        fake_create_default_context,
+    )
+    monkeypatch.setattr("kilntainers.server.connect_websocket", fake_connect)
+
+    connection = _connect_desktop_websocket(
+        "wss://desktop.fly.dev/private/websockify",
+        [cast(Subprotocol, "binary")],
+    )
+
+    assert connection is expected_connection
+    assert captured["cafile"] == certifi.where()
+    assert captured["target"] == "wss://desktop.fly.dev/private/websockify"
+    assert captured["options"] == {
+        "ssl": expected_context,
+        "subprotocols": ["binary"],
+        "max_size": None,
+    }
+
+
+def test_desktop_websocket_keeps_local_connection_without_tls(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    expected_connection = object()
+
+    def fake_connect(target: str, **options: object) -> object:
+        captured["target"] = target
+        captured["options"] = options
+        return expected_connection
+
+    monkeypatch.setattr("kilntainers.server.connect_websocket", fake_connect)
+
+    connection = _connect_desktop_websocket(
+        "ws://127.0.0.1:49152/websockify",
+        [],
+    )
+
+    assert connection is expected_connection
+    assert captured["target"] == "ws://127.0.0.1:49152/websockify"
+    assert captured["options"] == {
+        "ssl": None,
+        "subprotocols": None,
+        "max_size": None,
+    }
 
 
 @pytest.fixture
