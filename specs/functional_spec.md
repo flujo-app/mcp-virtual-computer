@@ -165,14 +165,13 @@ Kilntainers is configured through CLI parameters at startup. One server instance
 | `--output-limit` | integer (bytes) | `2097152` | Max combined stdout+stderr per exec. (D24) |
 | `--extended-tool-instruction` | string | — | Appended to backend's tool description. (D16) |
 | `--tool-instruction-override` | string | — | Replaces the entire tool description. (D16) |
-| `--session-timeout` | integer (sec) | `300` | Idle session timeout (HTTP mode only). |
 
-> **Note:** `--session-timeout` only applies to Streamable HTTP mode, where the server manages multiple concurrent sessions. In stdio mode, the session lives as long as the process runs. Passing session-timeout when stdio should error explaining why.
+> **Current behavior:** the no-op `--session-timeout` option was removed. Persistent computer lifetime is independent of protocol connections.
 
 **Constraints:**
 
 - `--extended-tool-instruction` and `--tool-instruction-override` are mutually exclusive. Providing both is a startup error. (D16)
-- `--host`, `--port`, and `--session-timeout` error if passed to stdio mode where they do no apply.
+- Stdio serves its authenticated companion on loopback; `--port` can select its port. A non-loopback `--host` is rejected for stdio.
 - `--host` defaults to `127.0.0.1` (localhost only) for security. Set to `0.0.0.0` for remote access — see Section 9 security notes.
 
 ### 3.2 Docker Backend Parameters (V1)
@@ -207,88 +206,43 @@ Steps 1–2 are synchronous and complete before the server accepts any MCP conne
 
 ## 4. Connection Lifecycle
 
-### 4.1 stdio Transport
+### 4.1 Configured permanent computer
 
-One sandbox for the lifetime of the server process. (D8)
+One process owns the computer named by required `COMPUTER_ID`. Both stdio and
+HTTP clients of that process share that computer. There is no per-connection
+tenant isolation and no automatic disposable computer selection.
 
-```
-Process starts → validate config → accept MCP messages
-  → first terminal_execute → start sandbox (validate backend, pull image if needed)
-  → execute command → ... → stdin closes or SIGTERM → stop sandbox → exit
-```
+### 4.2 Protocol connections
 
-**Lazy sandbox creation:** The server accepts MCP connections and responds to non-exec requests (`tools/list`, etc.) immediately after config validation. The sandbox is created on the first `terminal_execute` call. Image pull happens during this first exec and blocks that call until complete. First run with a new image will be slow; subsequent runs use Docker's image cache. (D18)
+MCP 2026-07-28 uses stateless requests and `server/discover`; supported legacy
+clients may use initialization and HTTP session IDs. These protocol details do
+not select, create or destroy computers. The no-op `--session-timeout` option
+was removed instead of promising unsupported idle cleanup.
 
-If no `terminal_execute` is ever called during the session, no sandbox is created and no container resources are consumed.
+### 4.3 Lazy startup
 
-### 4.2 Streamable HTTP Transport
+Protocol discovery and tool listing do not provision a computer. The first
+computer operation validates backend prerequisites, creates or reattaches the
+configured computer, and waits for readiness. Concurrent attachment is guarded
+by the registry and application context. Failures return actionable tool errors;
+later calls may retry. Command timeouts bound execution, separately from backend
+provisioning deadlines. No user files are erased as part of attachment.
 
-Multiple concurrent sessions, each with its own independent sandbox. (D8, D28)
+### 4.4 Shutdown and reconnect
 
-```
-Server starts → validate config → listen on host:port
+When stdin closes or the process stops, application cleanup cancels its death
+monitors and releases registry ownership. It does not stop, reset or delete the
+permanent computer. A later process using the same `COMPUTER_ID` reattaches to
+the persisted computer and workspace. Each process creates a new dashboard
+capability; old browser URLs cease to authorize that server.
 
-Per session:
-  initialize request → return session ID
-    → accept tool calls → first terminal_execute → start sandbox
-    → execute command → ... → session ends → stop sandbox (if started)
-```
+### 4.5 Unexpected computer death
 
-**Lazy sandbox creation:** The `initialize` request completes immediately without creating a sandbox. The sandbox is created on the first `terminal_execute` call within the session. If the session ends without any `terminal_execute` calls, no sandbox resources are consumed.
-
-Sessions are identified by the `Mcp-Session-Id` header per the MCP Streamable HTTP protocol. A session ends when:
-
-- The client explicitly closes it.
-- No requests are received for `--session-timeout` seconds (default: 5 minutes).
-- The sandbox dies (D23).
-
-Multiple sessions can be active simultaneously. Each has an independent sandbox — no shared state between sessions.
-
-### 4.3 Sandbox Startup Sequence
-
-Sandbox creation is **lazy** — it happens on the first `terminal_execute` call, not at connection time. The full startup sequence runs when the first `terminal_execute` is received:
-
-1. **Validate backend prerequisites** (cached after first success) — e.g., verify the Docker daemon is reachable. (This was previously done at server startup.)
-2. **Pull image** if not locally available — blocking. (D18) Progress should be logged to stderr so the user knows something is happening.
-3. **Create and start** the sandbox (e.g., `docker run`).
-4. **Verify readiness** — execute a trivial command (e.g., `echo kilntainers-ready`) to confirm the sandbox accepts exec calls.
-5. **Return the exec result** for the first command.
-
-**Concurrency:** If multiple `terminal_execute` calls arrive before the sandbox is ready, only one sandbox is created. Concurrent calls wait for the same creation to complete.
-
-**Timeout isolation:** The command timeout parameter applies only to the command execution (step 5 conceptually), not to the sandbox startup time (steps 1–4). Sandbox startup has its own internal timeouts defined by the backend.
-
-**Failure handling:** If any startup step fails, the `terminal_execute` call returns an MCP error (`isError: true`) with an actionable message. The session remains alive — subsequent `terminal_execute` calls will retry sandbox creation. Once a sandbox is successfully created, it is used for all future calls in that session. If the sandbox dies after successful creation, the session is dead (see §4.5).
-
-**No sandbox for non-exec requests:** `tools/list`, `initialize`, and other MCP protocol requests never trigger sandbox creation. The server responds to these immediately.
-
-### 4.4 Graceful Shutdown
-
-When a connection ends normally:
-
-- **stdio** — stdin closes or process receives SIGTERM.
-- **HTTP session** — client closes session, or idle timeout expires.
-- **HTTP server** — process receives SIGTERM (all active sessions are torn down).
-
-Shutdown sequence:
-
-1. Any in-flight exec is **killed immediately.** The client is disconnecting — no one will receive the result.
-2. The sandbox is stopped (e.g., `docker stop`).
-3. Sandbox resources are cleaned up. (For Docker, `--rm` handles this automatically when the container stops; other future backends may require explicit cleanup.)
-4. If cleanup takes more than **10 seconds**, force-kill and proceed.
-
-### 4.5 Sandbox Death
-
-If the sandbox dies unexpectedly (OOM, killed externally, Docker daemon crash): (D6, D23)
-
-- **During an exec call:** Return an MCP error (`isError: true`) for the in-flight call with a message explaining the sandbox terminated unexpectedly, then drop the connection.
-- **Between exec calls:** Drop the connection immediately. The client sees a disconnected server.
-
-**stdio:** Process exits. Most MCP clients will offer to restart the server, which gives the user a fresh sandbox.
-
-**HTTP:** The session is terminated. The client can create a new session and get a new sandbox.
-
-No restart is attempted. Sandbox death is unrecoverable in v1. (D6)
+Backend failures surface as tool errors. Stdio's death monitor terminates its
+own MCP process on unexpected computer death; HTTP operations can refresh
+backend state. Reconnecting always targets the configured computer identity,
+never an automatically allocated replacement identity. Destructive provider
+actions require an explicit lifecycle operation outside ordinary disconnects.
 
 ---
 
@@ -549,7 +503,7 @@ kilntainers \
 | **Resource exhaustion** — CPU abuse, memory bombs, disk fill, fork bombs | Backend-specific resource limits (`--cpu`, `--memory`, Docker PID limits via `--docker-run-flag`). Exec timeout prevents indefinite CPU use. |
 | **Container escape** | Relies on the backend's isolation technology (Docker, WASI). Not a Kilntainers-specific concern — use up-to-date container runtimes. |
 | **Host filesystem access** | No mounts by default. Future mapped working directory will be scoped to a single user-specified directory. (D14) |
-| **MCP server abuse** (HTTP mode) | Default bind to `127.0.0.1`. `--session-timeout` reclaims idle resources. No built-in authentication — production HTTP deployments should use a reverse proxy with auth. |
+| **MCP server abuse** (HTTP mode) | Default bind to `127.0.0.1`. Static bearer authentication and scoped companion capabilities protect sensitive routes. Exact Origin/Host checks reject browser rebinding; remote deployments use TLS. |
 
 ### 9.3 Operator Responsibilities
 
@@ -580,8 +534,8 @@ The following open items from [spec_queue.md](spec_queue.md) were resolved in th
 | **Container startup flow** | Pull → create/start → verify readiness → accept calls. Pull failure = startup error. | §4.3 |
 | **Docker config approach** | Flat CLI args for v1 with `--docker-run-flag` escape hatch for uncovered options. | §3.2 |
 | **Tool description text** | Drafted for Docker backend with dynamic shell, timeout, and output limit values. Custom image → no description, requires override. | §7 |
-| **Startup parameters** | Full schema in §3 including transport, host, port, session-timeout. | §3.1, §3.2 |
-| **Connection lifecycle** | stdio: one sandbox per process. Streamable HTTP: one sandbox per session, identified by Mcp-Session-Id. 5-minute idle timeout (configurable). | §4 |
+| **Startup parameters** | Full schema in §3 including transport, host, port, exec deadlines and trusted HTTP origins. | §3.1, §3.2 |
+| **Connection lifecycle** | One permanent configured computer across both transports and reconnects; no automatic idle destruction. | §4 |
 | **Security model** | Threat model covering exfiltration, resource abuse, container escape, host access, and HTTP exposure. | §9 |
 | **D8 transport correction** | Streamable HTTP, not SSE. These are different transports; SSE is deprecated. D8 updated. | §1 |
 | **No additional logging** | No logging system in v1. Focus on great error responses. Standard HTTP logging via reverse proxy if needed. (D31) | — |

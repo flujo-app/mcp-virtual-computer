@@ -20,7 +20,7 @@ How the Docker backend implements the abstraction layer: subprocess calls to the
 
 ### [Phase 4: MCP Server & Tool Layer](mcp_server.md)
 
-MCP library evaluation (official `mcp` SDK v1.x with built-in FastMCP), server architecture with lifespan context for per-session sandbox management, `terminal_execute` tool registration with dynamic description, the tool handler implementation (input validation, `ExecRequest` construction, `ExecResult` → JSON response formatting, `isError` mapping), tool description assembly rules, transport configuration (stdio and Streamable HTTP), and the `create_server()` factory function.
+MCP library evaluation (official `mcp` SDK v2 with public MCPServer and Extension APIs), server architecture with application lifespan context for ownership of the configured permanent computer, `terminal_execute` tool registration with dynamic description, the tool handler implementation (input validation, `ExecRequest` construction, `ExecResult` → JSON response formatting, `isError` mapping), tool description assembly rules, transport configuration (stdio and Streamable HTTP), and the `create_server()` factory function.
 
 ### [Phase 5: CLI, Configuration & Startup](cli_and_startup.md)
 
@@ -28,7 +28,7 @@ Argument parsing with `argparse` (no third-party CLI libraries), the `ServerConf
 
 ### [Phase 6: Connection & Session Lifecycle](connection_lifecycle.md)
 
-How stdio and Streamable HTTP transports map to sandbox lifecycles: stdio runs one sandbox for the process lifetime, HTTP runs one per `Mcp-Session-Id` session. Covers session creation and request routing, idle session timeout (`--session-timeout`) and its SDK integration, the one-sandbox-per-session ownership model, sandbox death propagation (SIGTERM self-signal for stdio, request-time detection for HTTP), graceful shutdown orchestration (cancel death task → stop sandbox), force-kill timeouts, and edge cases (concurrent death and exec, rapid reconnection, SIGTERM during creation).
+Both transports serve the same configured permanent computer. Modern MCP requests are stateless; supported legacy sessions do not own or destroy a computer. Cleanup releases process ownership and death monitors. See current functional spec section 4 and README; older phase subdocuments record the upstream disposable-sandbox design and are superseded for this fork.
 
 ### [Modal Backend Implementation](modal_backend.md)
 

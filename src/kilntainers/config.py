@@ -1,8 +1,10 @@
 """Configuration dataclasses for the single-computer Docker server."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
+
+from kilntainers.auth import CompanionAccess
 
 Transport = Literal["stdio", "http"]
 
@@ -64,8 +66,13 @@ class ServerConfig:
     tool_instruction_override: str | None = None
     extended_tool_instruction: str | None = None
 
-    # Session management (HTTP only)
-    session_timeout: int = 300  # seconds (5 minutes)
+    # A fresh browser capability is scoped to this server process. Exclude it
+    # from repr/equality so diagnostics never reveal it.
+    companion_access: CompanionAccess = field(
+        default_factory=CompanionAccess.generate, repr=False, compare=False
+    )
+    allowed_http_hosts: tuple[str, ...] = ()
+    allowed_http_origins: tuple[str, ...] = ()
 
     # Remote HTTP protection
     auth_token: str | None = None

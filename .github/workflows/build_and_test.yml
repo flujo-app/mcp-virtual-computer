@@ -32,3 +32,11 @@ jobs:
 
       - name: Build, lint, typecheck, test, and package
         run: npm run check
+
+      - name: Exercise built wheel against disposable Docker computers
+        env:
+          AUTO_INSTALL_DOCKER: "false"
+        run: |
+          uv run pytest scripts/test_smoke_docker.py -q
+          docker info > /dev/null
+          uv run --no-project --with "$(find dist -maxdepth 1 -name '*.whl' -print -quit)" python scripts/smoke-docker.py
