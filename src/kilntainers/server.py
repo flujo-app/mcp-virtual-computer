@@ -9,15 +9,21 @@ import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncContextManager, cast
+from urllib.parse import urlsplit
 
 import certifi
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.session import ServerSession
-from mcp.types import CallToolResult, ImageContent, TextContent
+from mcp.server import MCPServer
+from mcp.server.apps import Apps
+from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.resources import FunctionResource
+from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import CallToolResult, ImageContent, Resource, TextContent, Tool
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 from pydantic import Field
+from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
-from starlette.routing import WebSocketRoute
+from starlette.routing import BaseRoute, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import connect as connect_websocket
 from websockets.typing import Subprotocol
@@ -61,7 +67,7 @@ STDIN_LIMIT = 2 * 1024 * 1024  # 2 MiB (D32)
 
 
 class SessionContext:
-    """Per-session state, available to tool handlers via Context.
+    """Application-lifetime state for the configured persistent computer.
 
     Supports lazy sandbox creation — the sandbox is only created on
     the first call to get_or_create_sandbox(). This allows the MCP
@@ -295,8 +301,8 @@ def _result(
     """Create an MCP result with JSON fallback and structured app data."""
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(payload))],
-        isError=is_error,
-        structuredContent=payload,
+        is_error=is_error,
+        structured_content=payload,
     )
 
 
@@ -315,7 +321,7 @@ def _computer_ui_url(config: ServerConfig) -> str:
         host = "127.0.0.1"
     elif ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    return f"http://{host}:{config.port}/dashboard.html"
+    return config.companion_access.url(f"http://{host}:{config.port}/dashboard.html")
 
 
 def _computer_desktop_proxy_url(config: ServerConfig) -> str:
@@ -325,7 +331,7 @@ def _computer_desktop_proxy_url(config: ServerConfig) -> str:
         host = "127.0.0.1"
     elif ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    return f"ws://{host}:{config.port}/desktop/websockify"
+    return config.companion_access.url(f"ws://{host}:{config.port}/desktop/websockify")
 
 
 def _connect_desktop_websocket(
@@ -347,7 +353,7 @@ def _connect_desktop_websocket(
 
 
 def _session_from_context(
-    ctx: Context[ServerSession, SessionContext] | None,
+    ctx: Context[SessionContext, Any] | None,
 ) -> SessionContext | None:
     if ctx is None:
         return None
@@ -420,7 +426,7 @@ def create_lifespan(
     death_callback: Callable[[], None] | None = None,
     registry: ComputerRegistry | None = None,
     computer_id: str = "virtual-computer",
-) -> Callable[[FastMCP], AsyncContextManager[SessionContext]]:
+) -> Callable[[MCPServer], AsyncContextManager[SessionContext]]:
     """Create a lifespan context manager for the given transport.
 
     The returned context manager creates a SessionContext that supports
@@ -435,12 +441,12 @@ def create_lifespan(
             a custom callback to capture death notifications.
 
     Returns:
-        An async context manager function compatible with FastMCP.
+        An async context manager function compatible with MCPServer.
     """
 
     @asynccontextmanager
-    async def lifespan(server: FastMCP) -> AsyncIterator[SessionContext]:
-        """Create a SessionContext for this session and clean up on exit."""
+    async def lifespan(server: MCPServer) -> AsyncIterator[SessionContext]:
+        """Share one computer context for the serving lifetime and release on exit."""
         ctx = SessionContext(
             backend=backend,
             transport=transport,
@@ -524,7 +530,7 @@ def _create_handler(config: ServerConfig) -> Callable[..., Any]:
         stdin: str | None = None,
         working_directory: str | None = None,
         timeout: int | None = None,
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Handle a terminal_execute tool call.
 
@@ -534,11 +540,12 @@ def _create_handler(config: ServerConfig) -> Callable[..., Any]:
             stdin: Content to pipe to stdin.
             working_directory: Working directory for the command (must be absolute).
             timeout: Timeout in seconds (defaults to server config).
-            ctx: FastMCP context object (injected automatically).
+            ctx: MCPServer context object (injected automatically).
 
         Returns:
             A CallToolResult with the execution result or error.
         """
+
         def error_result(message: str) -> CallToolResult:
             return _result(
                 {
@@ -566,7 +573,7 @@ def _create_handler(config: ServerConfig) -> Callable[..., Any]:
             return error_result(error)
 
         # --- Get sandbox from context ---
-        # ctx should always be provided by FastMCP, but handle None for safety
+        # ctx should always be provided by MCPServer, but handle None for safety
         if ctx is None:
             return error_result("Internal error: no context provided")
 
@@ -592,16 +599,16 @@ def _create_handler(config: ServerConfig) -> Callable[..., Any]:
         # --- Construct ExecRequest ---
         # --- Execute ---
         try:
-            resolved_timeout = timeout if timeout is not None else config.default_timeout
+            resolved_timeout = (
+                timeout if timeout is not None else config.default_timeout
+            )
             if sandbox.desktop_environment and sandbox.desktop_url is not None:
                 result = await visible_terminal_execute(
                     sandbox,
                     command=command,
                     args=args,
                     stdin=stdin,
-                    working_directory=(
-                        working_directory or config.workspace_directory
-                    ),
+                    working_directory=(working_directory or config.workspace_directory),
                     timeout=resolved_timeout,
                     output_limit=config.output_limit,
                 )
@@ -635,8 +642,8 @@ def _create_handler(config: ServerConfig) -> Callable[..., Any]:
 
         return CallToolResult(
             content=[TextContent(type="text", text=response_json)],
-            isError=False,
-            structuredContent=response,
+            is_error=False,
+            structured_content=response,
         )
 
     return terminal_execute_handler
@@ -667,7 +674,7 @@ def _lifecycle_meta(*, model_visible: bool) -> dict[str, Any]:
     }
 
 
-def _register_computer_tools(mcp: FastMCP, config: ServerConfig) -> None:
+def _register_computer_tools(mcp: MCPServer, config: ServerConfig) -> None:
     """Register provider-neutral lifecycle tools used by models and the App."""
 
     async def inventory(session: SessionContext) -> dict[str, Any]:
@@ -678,7 +685,7 @@ def _register_computer_tools(mcp: FastMCP, config: ServerConfig) -> None:
         }
 
     async def computer_dashboard(
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Open the interactive sandbox computer dashboard."""
         session = _session_from_context(ctx)
@@ -692,7 +699,7 @@ def _register_computer_tools(mcp: FastMCP, config: ServerConfig) -> None:
             return _result({"error": str(error)}, is_error=True)
 
     async def computer_list(
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """List temporary and permanent computers managed by this backend."""
         session = _session_from_context(ctx)
@@ -707,13 +714,13 @@ def _register_computer_tools(mcp: FastMCP, config: ServerConfig) -> None:
 
     async def computer_create(
         computer_id: Annotated[
-            str,  # noqa: RUF013
+            str | None,
             Field(
                 description=(
                     "Optional lowercase slug. Omit to generate a readable random ID."
                 )
             ),
-        ] = None,  # type: ignore
+        ] = None,
         temporary: Annotated[
             bool,
             Field(
@@ -723,7 +730,7 @@ def _register_computer_tools(mcp: FastMCP, config: ServerConfig) -> None:
                 )
             ),
         ] = True,
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Create or attach to a named sandbox computer."""
         session = _session_from_context(ctx)
@@ -750,7 +757,7 @@ def _register_computer_tools(mcp: FastMCP, config: ServerConfig) -> None:
 
     async def computer_restart(
         computer_id: Annotated[str, Field(description="Computer slug to restart")],
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Restart a computer while preserving its writable filesystem."""
         session = _session_from_context(ctx)
@@ -776,7 +783,7 @@ def _register_computer_tools(mcp: FastMCP, config: ServerConfig) -> None:
             str,
             Field(description="Computer slug whose writable state will be erased"),
         ],
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Erase a computer's writable state and recreate it from its base image."""
         session = _session_from_context(ctx)
@@ -802,7 +809,7 @@ def _register_computer_tools(mcp: FastMCP, config: ServerConfig) -> None:
             str,
             Field(description="Computer slug to permanently delete"),
         ],
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Permanently delete a computer and its writable filesystem."""
         session = _session_from_context(ctx)
@@ -874,25 +881,138 @@ def _register_computer_tools(mcp: FastMCP, config: ServerConfig) -> None:
         return dashboard_html()
 
 
-def _enable_mcp_apps_capability(mcp: FastMCP) -> None:
-    """Advertise the stable MCP Apps extension missing from MCP SDK 1.x types."""
-    from mcp.types import ServerCapabilities
+class VirtualComputerServer(MCPServer[SessionContext]):
+    """Keep application routes and desktop visibility outside SDK internals."""
 
-    low_level_server = mcp._mcp_server
-    original = low_level_server.get_capabilities
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.companion_routes: list[BaseRoute] = []
+        self.desktop_capabilities_enabled = True
+        super().__init__(*args, **kwargs)
 
-    def get_capabilities_with_apps(
-        notification_options: Any,
-        experimental_capabilities: dict[str, dict[str, Any]],
-    ) -> ServerCapabilities:
-        capabilities = original(notification_options, experimental_capabilities)
-        payload = capabilities.model_dump(by_alias=True, exclude_none=True)
-        payload["extensions"] = {
-            "io.modelcontextprotocol/ui": {"mimeTypes": [DASHBOARD_MIME_TYPE]}
-        }
-        return ServerCapabilities.model_validate(payload)
+    async def list_tools(self) -> list[Tool]:
+        return sorted(await super().list_tools(), key=lambda tool: tool.name)
 
-    setattr(low_level_server, "get_capabilities", get_capabilities_with_apps)
+    async def list_resources(self) -> list[Resource]:
+        resources = await super().list_resources()
+        if not self.desktop_capabilities_enabled:
+            resources = [
+                resource
+                for resource in resources
+                if str(resource.uri) not in {SCREEN_IMAGE_URI, SCREEN_ACCESSIBILITY_URI}
+            ]
+        return sorted(resources, key=lambda resource: str(resource.uri))
+
+    async def read_resource(
+        self,
+        uri: Any,
+        context: Context[SessionContext, Any] | None = None,
+    ) -> Any:
+        if not self.desktop_capabilities_enabled and str(uri) in {
+            SCREEN_IMAGE_URI,
+            SCREEN_ACCESSIBILITY_URI,
+        }:
+            from mcp.server.mcpserver.exceptions import ResourceNotFoundError
+
+            raise ResourceNotFoundError(
+                "Desktop resources are unavailable in headless mode."
+            )
+        return await super().read_resource(uri, context)
+
+
+def create_http_app(mcp: VirtualComputerServer, config: ServerConfig) -> Starlette:
+    """Build the dual-era SDK app; the caller wraps all routes with authorization."""
+    loopback = config.host in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"}
+    bind_hosts = (
+        ["127.0.0.1", "localhost", "[::1]"]
+        if loopback
+        else [
+            f"[{config.host}]"
+            if ":" in config.host and not config.host.startswith("[")
+            else config.host
+        ]
+    )
+    hosts = [f"{host}:{config.port}" for host in bind_hosts]
+    if config.port == 80:
+        hosts.extend(bind_hosts)
+    origins = [
+        *(f"http://{host}:{config.port}" for host in bind_hosts),
+        *config.allowed_http_origins,
+    ]
+    for origin in list(origins):
+        parsed = urlsplit(origin)
+        default_port = {"http": 80, "https": 443}.get(parsed.scheme)
+        if (
+            default_port is not None
+            and parsed.hostname is not None
+            and parsed.port == default_port
+            and not (parsed.path or parsed.query or parsed.fragment)
+            and parsed.username is None
+            and parsed.password is None
+        ):
+            hostname = parsed.hostname
+            authority = f"[{hostname}]" if ":" in hostname else hostname
+            origins.append(f"{parsed.scheme}://{authority}")
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=list(dict.fromkeys([*hosts, *config.allowed_http_hosts])),
+        allowed_origins=list(dict.fromkeys(origins)),
+    )
+    app = mcp.streamable_http_app(
+        host=config.host,
+        streamable_http_path="/mcp",
+        transport_security=security,
+    )
+    app.router.routes.extend(mcp.companion_routes)
+    return app
+
+
+async def _notify_catalog_changed(ctx: Context[SessionContext, Any]) -> None:
+    """Use the appropriate public notification channel for the request's era."""
+    if ctx.protocol_version in MODERN_PROTOCOL_VERSIONS:
+        await ctx.notify_tools_changed()
+        await ctx.notify_resources_changed()
+    else:
+        await ctx.session.send_tool_list_changed()
+        await ctx.session.send_resource_list_changed()
+
+
+def _activity_snapshot(
+    phase: str,
+    operation: str,
+    arguments: dict[str, Any],
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Retain execution metadata, never commands, file text, outputs or URLs."""
+    argument_summary = {
+        key: value
+        for key, value in arguments.items()
+        if key in {"path", "working_directory", "timeout"}
+        and isinstance(value, (str, int))
+    }
+    payload_summary: dict[str, Any] = {}
+    if payload is not None:
+        for key in (
+            "path",
+            "size_bytes",
+            "exit_code",
+            "exec_duration_ms",
+            "replacements",
+        ):
+            value = payload.get(key)
+            if isinstance(value, (str, int)):
+                payload_summary[key] = value
+        for key in ("stdout", "stderr", "content"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                payload_summary[f"{key}_bytes"] = len(value.encode("utf-8"))
+        payload_summary["status"] = "error" if payload.get("error") else "complete"
+    return {
+        "phase": phase,
+        "operation": operation,
+        "arguments": argument_summary,
+        "payload": payload_summary if payload is not None else None,
+        "summary": f"{operation} {phase}",
+    }
 
 
 # --- Server Factory ---
@@ -901,7 +1021,7 @@ def _enable_mcp_apps_capability(mcp: FastMCP) -> None:
 def create_server(
     backend: Backend,
     config: ServerConfig,
-) -> FastMCP:
+) -> VirtualComputerServer:
     """Create and configure the MCP server.
 
     Args:
@@ -909,7 +1029,7 @@ def create_server(
         config: Server configuration (transport, host, port, timeouts, etc.).
 
     Returns:
-        Configured FastMCP instance ready to run.
+        Configured MCPServer instance ready to run.
 
     Raises:
         BackendError: If tool description assembly fails.
@@ -931,18 +1051,20 @@ def create_server(
     )
 
     # Create server
-    mcp = FastMCP(
+    from importlib.metadata import version
+
+    mcp = VirtualComputerServer(
         name="MCP Virtual Computer",
+        version=version("mcp-virtual-computer"),
         lifespan=lifespan,
-        host=config.host,
-        port=config.port,
+        extensions=[Apps()],
     )
+    dashboard_resource: FunctionResource | None = None
 
     def sync_dashboard_resource_meta(desktop_url: str | None = None) -> None:
         """Publish exact loopback origins for hosts that reject wildcard ports."""
-        resource = mcp._resource_manager._resources.get(DASHBOARD_URI)
-        if resource is not None:
-            resource.meta = dashboard_resource_meta(
+        if dashboard_resource is not None:
+            dashboard_resource.meta = dashboard_resource_meta(
                 _computer_ui_url(config),
                 _computer_desktop_proxy_url(config),
                 desktop_url,
@@ -968,10 +1090,7 @@ def create_server(
         activity_events.append(
             {
                 "revision": activity_revision,
-                "phase": phase,
-                "operation": operation,
-                "arguments": arguments,
-                "payload": payload,
+                **_activity_snapshot(phase, operation, arguments, payload),
             }
         )
         del activity_events[:-64]
@@ -989,7 +1108,9 @@ def create_server(
         return JSONResponse(
             {
                 "revision": activity_revision,
-                "events": [event for event in activity_events if event["revision"] > after],
+                "events": [
+                    event for event in activity_events if event["revision"] > after
+                ],
             },
             headers={"Cache-Control": "no-store"},
         )
@@ -1087,7 +1208,7 @@ def create_server(
             except RuntimeError:
                 pass
 
-    mcp._custom_starlette_routes.append(
+    mcp.companion_routes.append(
         cast(
             Any,
             WebSocketRoute(
@@ -1101,28 +1222,30 @@ def create_server(
     handler = _create_handler(config)
 
     # Wrapper closure for better MCP type hinting
-    # type ignore and noqa needed to get the right type hints. Type hinting doesn't work for Optional[str] so str but assign None as default.
+    # SDK v2 validates optional inputs against their nullable annotations.
     async def terminal_execute(
         command: Annotated[
-            str,  # noqa: RUF013
+            str | None,
             Field(description="Shell command string (mutually exclusive with args)."),
-        ] = None,  # type: ignore
+        ] = None,
         args: Annotated[
-            list[str],  # noqa: RUF013
+            list[str] | None,
             Field(
                 description="List of arguments for direct execution (mutually exclusive with command)."
             ),
-        ] = None,  # type: ignore
-        stdin: Annotated[str, Field(description="Content to pipe to stdin.")] = None,  # type: ignore # noqa: RUF013
+        ] = None,
+        stdin: Annotated[
+            str | None, Field(description="Content to pipe to stdin.")
+        ] = None,
         working_directory: Annotated[
-            str,  # noqa: RUF013
+            str | None,
             Field(description="Working directory for the command (must be absolute)."),
-        ] = None,  # type: ignore
+        ] = None,
         timeout: Annotated[
-            int,  # noqa: RUF013
+            int | None,
             Field(description="Timeout in seconds (defaults to server config)."),
-        ] = None,  # type: ignore
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ] = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         arguments = {
             key: value
@@ -1144,12 +1267,12 @@ def create_server(
             timeout=timeout,
             ctx=ctx,
         )
-        payload = dict(result.structuredContent or {})
+        payload = dict(result.structured_content or {})
         if payload.get("desktop_url"):
             payload["desktop_url"] = public_desktop_url(
                 registry.peek(config.computer_id)
             )
-            result = _result(payload, is_error=bool(result.isError))
+            result = _result(payload, is_error=bool(result.is_error))
         publish_activity("result", "terminal_execute", arguments, payload)
         return result
 
@@ -1160,7 +1283,7 @@ def create_server(
     )
 
     async def computer_ui(
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Open the Three.js virtual computer."""
         computer_url = _computer_ui_url(config)
@@ -1208,12 +1331,9 @@ def create_server(
             )
         capabilities_changed = False
         if desktop_capability_sync is not None:
-            capabilities_changed = desktop_capability_sync(
-                sandbox.desktop_environment
-            )
+            capabilities_changed = desktop_capability_sync(sandbox.desktop_environment)
         if capabilities_changed and ctx is not None:
-            await ctx.session.send_tool_list_changed()
-            await ctx.session.send_resource_list_changed()
+            await _notify_catalog_changed(ctx)
         sync_dashboard_resource_meta(sandbox.desktop_url)
         return _result(
             {
@@ -1241,7 +1361,7 @@ def create_server(
     )
 
     async def runtime_status(
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Return lazy host-runtime setup state for the computer App."""
         session = _session_from_context(ctx)
@@ -1272,12 +1392,9 @@ def create_server(
                 )
         capabilities_changed = False
         if sandbox is not None and desktop_capability_sync is not None:
-            capabilities_changed = desktop_capability_sync(
-                sandbox.desktop_environment
-            )
+            capabilities_changed = desktop_capability_sync(sandbox.desktop_environment)
         if capabilities_changed and ctx is not None:
-            await ctx.session.send_tool_list_changed()
-            await ctx.session.send_resource_list_changed()
+            await _notify_catalog_changed(ctx)
         return _result(
             {
                 "operation": "idle",
@@ -1308,12 +1425,14 @@ def create_server(
             bool,
             Field(description="Whether the computer may access the network."),
         ],
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Plug in or unplug the virtual computer's real network connection."""
         session = _session_from_context(ctx)
         if session is None:
-            return _result({"error": "Internal error: no context provided"}, is_error=True)
+            return _result(
+                {"error": "Internal error: no context provided"}, is_error=True
+            )
         try:
             async with runtime_switch_lock:
                 await session.get_or_create_sandbox()
@@ -1335,14 +1454,18 @@ def create_server(
     async def set_desktop_environment(
         enabled: Annotated[
             bool,
-            Field(description="Use a real Xfce desktop instead of the virtual desktop."),
+            Field(
+                description="Use a real Xfce desktop instead of the virtual desktop."
+            ),
         ],
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Switch the same computer between virtual and real desktops."""
         session = _session_from_context(ctx)
         if session is None:
-            return _result({"error": "Internal error: no context provided"}, is_error=True)
+            return _result(
+                {"error": "Internal error: no context provided"}, is_error=True
+            )
         try:
             async with runtime_switch_lock:
                 await session.get_or_create_sandbox()
@@ -1353,8 +1476,7 @@ def create_server(
                 if desktop_capability_sync is not None:
                     desktop_capability_sync(sandbox.desktop_environment)
             if ctx is not None:
-                await ctx.session.send_tool_list_changed()
-                await ctx.session.send_resource_list_changed()
+                await _notify_catalog_changed(ctx)
             return _result(
                 {
                     "operation": "idle",
@@ -1390,7 +1512,7 @@ def create_server(
     )
 
     async def _sandbox_for_file_tool(
-        ctx: Context[ServerSession, SessionContext] | None,
+        ctx: Context[SessionContext, Any] | None,
     ) -> tuple[SessionContext, Sandbox]:
         session = _session_from_context(ctx)
         if session is None:
@@ -1411,7 +1533,7 @@ def create_server(
             str,
             Field(description="Directory path, absolute or relative to /workspace."),
         ] = ".",
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """List a real Docker directory for manual Explorer interaction."""
         try:
@@ -1476,9 +1598,11 @@ def create_server(
     async def read_file(
         path: Annotated[
             str,
-            Field(description="UTF-8 text file path, absolute or relative to /workspace."),
+            Field(
+                description="UTF-8 text file path, absolute or relative to /workspace."
+            ),
         ],
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Read a UTF-8 text file while the virtual computer opens and scrolls it."""
         arguments = {"path": path}
@@ -1525,14 +1649,16 @@ def create_server(
     async def write_file(
         path: Annotated[
             str,
-            Field(description="UTF-8 text file path, absolute or relative to /workspace."),
+            Field(
+                description="UTF-8 text file path, absolute or relative to /workspace."
+            ),
         ],
         content: Annotated[str, Field(description="Complete UTF-8 text to save.")],
         create_parent_directories: Annotated[
             bool,
             Field(description="Create missing parent folders before saving."),
         ] = True,
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Atomically write a UTF-8 file while the virtual editor types it."""
         arguments = {
@@ -1600,18 +1726,24 @@ def create_server(
     async def edit_file(
         path: Annotated[
             str,
-            Field(description="UTF-8 text file path, absolute or relative to /workspace."),
+            Field(
+                description="UTF-8 text file path, absolute or relative to /workspace."
+            ),
         ],
         old_text: Annotated[
             str,
-            Field(description="Exact text to select and replace; include context if ambiguous."),
+            Field(
+                description="Exact text to select and replace; include context if ambiguous."
+            ),
         ],
         new_text: Annotated[str, Field(description="Replacement UTF-8 text.")],
         replace_all: Annotated[
             bool,
-            Field(description="Replace every exact match instead of requiring one match."),
+            Field(
+                description="Replace every exact match instead of requiring one match."
+            ),
         ] = False,
-        ctx: Context[ServerSession, SessionContext] | None = None,
+        ctx: Context[SessionContext, Any] | None = None,
     ) -> CallToolResult:
         """Replace exact text while the virtual editor selects and overwrites it."""
         arguments = {
@@ -1667,9 +1799,21 @@ def create_server(
             return _result(payload, is_error=True)
 
     for tool, name, tool_description in (
-        (read_file, "read_file", "Read a UTF-8 text file and show it being opened and scrolled on the virtual computer."),
-        (write_file, "write_file", "Write a UTF-8 text file and show it being typed and saved on the virtual computer."),
-        (edit_file, "edit_file", "Replace exact UTF-8 text and show it being selected, overwritten, and saved."),
+        (
+            read_file,
+            "read_file",
+            "Read a UTF-8 text file and show it being opened and scrolled on the virtual computer.",
+        ),
+        (
+            write_file,
+            "write_file",
+            "Write a UTF-8 text file and show it being typed and saved on the virtual computer.",
+        ),
+        (
+            edit_file,
+            "edit_file",
+            "Replace exact UTF-8 text and show it being selected, overwritten, and saved.",
+        ),
     ):
         mcp.add_tool(tool, name=name, description=tool_description)
 
@@ -1678,7 +1822,7 @@ def create_server(
     if True:
 
         async def _live_desktop(
-            ctx: Context[ServerSession, SessionContext] | None,
+            ctx: Context[SessionContext, Any] | None,
         ) -> Sandbox:
             _session, sandbox = await _sandbox_for_file_tool(ctx)
             if sandbox.desktop_url is None:
@@ -1731,7 +1875,7 @@ def create_server(
                 bool,
                 Field(description="Include the current AT-SPI accessibility snapshot."),
             ] = True,
-            ctx: Context[ServerSession, SessionContext] | None = None,
+            ctx: Context[SessionContext, Any] | None = None,
         ) -> CallToolResult:
             """Look at the live desktop as pixels, accessible elements, or both."""
             if not include_image and not include_accessibility:
@@ -1762,19 +1906,19 @@ def create_server(
                         ImageContent(
                             type="image",
                             data=base64.b64encode(image).decode("ascii"),
-                            mimeType="image/png",
+                            mime_type="image/png",
                         )
                     )
                 return CallToolResult(
                     content=content,
-                    isError=False,
-                    structuredContent=payload,
+                    is_error=False,
+                    structured_content=payload,
                 )
             except (BackendError, DesktopControlError, SandboxDiedError) as error:
                 return _result({"error": str(error)}, is_error=True)
 
         async def _run_desktop_tool(
-            ctx: Context[ServerSession, SessionContext] | None,
+            ctx: Context[SessionContext, Any] | None,
             action: str,
             payload: dict[str, Any],
         ) -> CallToolResult:
@@ -1793,11 +1937,13 @@ def create_server(
 
         async def click(
             element: Annotated[
-                str,  # noqa: RUF013
-                Field(description="AT-SPI ref from look_at_screen (for example atspi:8/0/2)."),
-            ] = None,  # type: ignore
-            x: Annotated[int, Field(description="Desktop X coordinate.")] = None,  # type: ignore # noqa: RUF013
-            y: Annotated[int, Field(description="Desktop Y coordinate.")] = None,  # type: ignore # noqa: RUF013
+                str | None,
+                Field(
+                    description="AT-SPI ref from look_at_screen (for example atspi:8/0/2)."
+                ),
+            ] = None,
+            x: Annotated[int | None, Field(description="Desktop X coordinate.")] = None,
+            y: Annotated[int | None, Field(description="Desktop Y coordinate.")] = None,
             button: Annotated[
                 str,
                 Field(description="Mouse button: left, middle, or right."),
@@ -1806,21 +1952,29 @@ def create_server(
                 int,
                 Field(description="Click count from 1 to 3.", ge=1, le=3),
             ] = 1,
-            ctx: Context[ServerSession, SessionContext] | None = None,
+            ctx: Context[SessionContext, Any] | None = None,
         ) -> CallToolResult:
             """Click a live accessibility element or desktop coordinates."""
             return await _run_desktop_tool(
                 ctx,
                 "click",
-                {"element": element, "x": x, "y": y, "button": button, "clicks": clicks},
+                {
+                    "element": element,
+                    "x": x,
+                    "y": y,
+                    "button": button,
+                    "clicks": clicks,
+                },
             )
 
         async def type_on_screen(
-            text: Annotated[str, Field(description="Text to type into the active control.")],
+            text: Annotated[
+                str, Field(description="Text to type into the active control.")
+            ],
             element: Annotated[
-                str,  # noqa: RUF013
+                str | None,
                 Field(description="Optional AT-SPI ref to focus before typing."),
-            ] = None,  # type: ignore
+            ] = None,
             clear: Annotated[
                 bool,
                 Field(description="Select existing content with Ctrl+A before typing."),
@@ -1831,9 +1985,13 @@ def create_server(
             ] = False,
             delay_ms: Annotated[
                 int,
-                Field(description="Delay between keystrokes in milliseconds.", ge=0, le=100),
+                Field(
+                    description="Delay between keystrokes in milliseconds.",
+                    ge=0,
+                    le=100,
+                ),
             ] = 2,
-            ctx: Context[ServerSession, SessionContext] | None = None,
+            ctx: Context[SessionContext, Any] | None = None,
         ) -> CallToolResult:
             """Type into the active Xfce control, optionally focusing it first."""
             return await _run_desktop_tool(
@@ -1858,22 +2016,32 @@ def create_server(
                 Field(description="Number of wheel steps.", ge=1, le=50),
             ] = 3,
             element: Annotated[
-                str,  # noqa: RUF013
+                str | None,
                 Field(description="Optional AT-SPI ref to scroll over."),
-            ] = None,  # type: ignore
-            x: Annotated[int, Field(description="Optional desktop X coordinate.")] = None,  # type: ignore # noqa: RUF013
-            y: Annotated[int, Field(description="Optional desktop Y coordinate.")] = None,  # type: ignore # noqa: RUF013
-            ctx: Context[ServerSession, SessionContext] | None = None,
+            ] = None,
+            x: Annotated[
+                int | None, Field(description="Optional desktop X coordinate.")
+            ] = None,
+            y: Annotated[
+                int | None, Field(description="Optional desktop Y coordinate.")
+            ] = None,
+            ctx: Context[SessionContext, Any] | None = None,
         ) -> CallToolResult:
             """Scroll the live desktop over an element, coordinates, or current pointer."""
             return await _run_desktop_tool(
                 ctx,
                 "scroll",
-                {"direction": direction, "amount": amount, "element": element, "x": x, "y": y},
+                {
+                    "direction": direction,
+                    "amount": amount,
+                    "element": element,
+                    "x": x,
+                    "y": y,
+                },
             )
 
         async def list_windows(
-            ctx: Context[ServerSession, SessionContext] | None = None,
+            ctx: Context[SessionContext, Any] | None = None,
         ) -> CallToolResult:
             """List live Xfce windows with IDs, geometry, class, title, and state."""
             return await _run_desktop_tool(ctx, "list_windows", {})
@@ -1881,9 +2049,11 @@ def create_server(
         async def switch_window(
             window: Annotated[
                 str,
-                Field(description="Window ID, exact title/class, or an unambiguous substring."),
+                Field(
+                    description="Window ID, exact title/class, or an unambiguous substring."
+                ),
             ],
-            ctx: Context[ServerSession, SessionContext] | None = None,
+            ctx: Context[SessionContext, Any] | None = None,
         ) -> CallToolResult:
             """Activate and raise a live Xfce window."""
             return await _run_desktop_tool(ctx, "switch_window", {"window": window})
@@ -1892,9 +2062,13 @@ def create_server(
             window: Annotated[str, Field(description="Window ID, title, or class.")],
             x: Annotated[int, Field(description="New desktop X coordinate.")],
             y: Annotated[int, Field(description="New desktop Y coordinate.")],
-            width: Annotated[int, Field(description="Optional new width.", ge=1)] = None,  # type: ignore # noqa: RUF013
-            height: Annotated[int, Field(description="Optional new height.", ge=1)] = None,  # type: ignore # noqa: RUF013
-            ctx: Context[ServerSession, SessionContext] | None = None,
+            width: Annotated[
+                int | None, Field(description="Optional new width.", ge=1)
+            ] = None,
+            height: Annotated[
+                int | None, Field(description="Optional new height.", ge=1)
+            ] = None,
+            ctx: Context[SessionContext, Any] | None = None,
         ) -> CallToolResult:
             """Move and optionally resize a live Xfce window."""
             return await _run_desktop_tool(
@@ -1904,7 +2078,7 @@ def create_server(
             )
 
         async def _window_tool(
-            ctx: Context[ServerSession, SessionContext] | None,
+            ctx: Context[SessionContext, Any] | None,
             action: str,
             window: str,
         ) -> CallToolResult:
@@ -1912,28 +2086,28 @@ def create_server(
 
         async def maximize_window(
             window: Annotated[str, Field(description="Window ID, title, or class.")],
-            ctx: Context[ServerSession, SessionContext] | None = None,
+            ctx: Context[SessionContext, Any] | None = None,
         ) -> CallToolResult:
             """Maximize a live Xfce window."""
             return await _window_tool(ctx, "maximize_window", window)
 
         async def restore_window(
             window: Annotated[str, Field(description="Window ID, title, or class.")],
-            ctx: Context[ServerSession, SessionContext] | None = None,
+            ctx: Context[SessionContext, Any] | None = None,
         ) -> CallToolResult:
             """Restore and activate a minimized or maximized Xfce window."""
             return await _window_tool(ctx, "restore_window", window)
 
         async def minimize_window(
             window: Annotated[str, Field(description="Window ID, title, or class.")],
-            ctx: Context[ServerSession, SessionContext] | None = None,
+            ctx: Context[SessionContext, Any] | None = None,
         ) -> CallToolResult:
             """Minimize a live Xfce window."""
             return await _window_tool(ctx, "minimize_window", window)
 
         async def close_window(
             window: Annotated[str, Field(description="Window ID, title, or class.")],
-            ctx: Context[ServerSession, SessionContext] | None = None,
+            ctx: Context[SessionContext, Any] | None = None,
         ) -> CallToolResult:
             """Close a live Xfce window."""
             return await _window_tool(ctx, "close_window", window)
@@ -1947,11 +2121,21 @@ def create_server(
                 "Return the live Xfce screen as PNG pixels and/or an AT-SPI snapshot.",
                 None,
             ),
-            (click, "click", "Click an AT-SPI element reference or screen coordinates.", None),
+            (
+                click,
+                "click",
+                "Click an AT-SPI element reference or screen coordinates.",
+                None,
+            ),
             (type_on_screen, "type", "Type into the active Xfce control.", None),
             (scroll, "scroll", "Scroll the live Xfce desktop.", None),
             (list_windows, "list_windows", "List live Xfce windows.", None),
-            (switch_window, "switch_window", "Activate and raise an Xfce window.", None),
+            (
+                switch_window,
+                "switch_window",
+                "Activate and raise an Xfce window.",
+                None,
+            ),
             (move_window, "move_window", "Move or resize an Xfce window.", None),
             (maximize_window, "maximize_window", "Maximize an Xfce window.", None),
             (restore_window, "restore_window", "Restore an Xfce window.", None),
@@ -1961,10 +2145,6 @@ def create_server(
         for tool, name, tool_description, meta in desktop_tool_specs:
             mcp.add_tool(tool, name=name, description=tool_description, meta=meta)
 
-        desktop_resource_objects = {
-            uri: mcp._resource_manager._resources[uri]
-            for uri in (SCREEN_IMAGE_URI, SCREEN_ACCESSIBILITY_URI)
-        }
         desktop_capabilities_enabled = True
 
         def sync_desktop_capabilities(enabled: bool) -> bool:
@@ -1979,30 +2159,16 @@ def create_server(
                         description=tool_description,
                         meta=meta,
                     )
-                for resource in desktop_resource_objects.values():
-                    mcp.add_resource(resource)
             else:
                 for _tool, name, _description, _meta in desktop_tool_specs:
                     mcp.remove_tool(name)
-                for uri in desktop_resource_objects:
-                    mcp._resource_manager._resources.pop(uri, None)
             desktop_capabilities_enabled = enabled
+            mcp.desktop_capabilities_enabled = enabled
             return True
 
         desktop_capability_sync = sync_desktop_capabilities
         desktop_capability_sync(config.desktop_environment)
 
-    @mcp.resource(
-        DASHBOARD_URI,
-        name="Virtual Computer",
-        title="Virtual Computer",
-        description="Three.js laptop-on-desk view for terminal and file operations.",
-        mime_type=DASHBOARD_MIME_TYPE,
-        meta=dashboard_resource_meta(
-            _computer_ui_url(config),
-            _computer_desktop_proxy_url(config),
-        ),
-    )
     def virtual_computer_resource() -> str:
         live_sandbox = registry.peek(config.computer_id)
         sync_dashboard_resource_meta(
@@ -2010,6 +2176,17 @@ def create_server(
         )
         return dashboard_html()
 
-    _enable_mcp_apps_capability(mcp)
-
+    dashboard_resource = FunctionResource(
+        uri=DASHBOARD_URI,
+        name="Virtual Computer",
+        title="Virtual Computer",
+        description="Three.js laptop-on-desk view for terminal and file operations.",
+        mime_type=DASHBOARD_MIME_TYPE,
+        fn=virtual_computer_resource,
+        meta=dashboard_resource_meta(
+            _computer_ui_url(config),
+            _computer_desktop_proxy_url(config),
+        ),
+    )
+    mcp.add_resource(dashboard_resource)
     return mcp

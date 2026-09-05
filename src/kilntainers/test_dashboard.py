@@ -1,5 +1,6 @@
 """Three.js MCP App registration and static auth tests."""
 
+from mcp import Client
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -17,13 +18,13 @@ from kilntainers.dashboard import (
 from kilntainers.server import create_server
 
 
-def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
+async def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
     server = create_server(
         MockBackend(BackendConfig()),
         ServerConfig(desktop_environment=False),
     )
-    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
-    resources = server._resource_manager.list_resources()
+    tools = {tool.name: tool for tool in await server.list_tools()}
+    resources = await server.list_resources()
 
     assert set(tools) == {
         "terminal_execute",
@@ -60,14 +61,10 @@ def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
     assert "http://127.0.0.1:8435" in resource_meta["ui"]["csp"]["connectDomains"]
     assert "ws://127.0.0.1:8435" in resource_meta["ui"]["csp"]["connectDomains"]
 
-    capabilities = server._mcp_server.create_initialization_options().capabilities
-    payload = capabilities.model_dump(by_alias=True, exclude_none=True)
-    assert payload["extensions"] == {
-        "io.modelcontextprotocol/ui": {"mimeTypes": [DASHBOARD_MIME_TYPE]}
-    }
-    assert DASHBOARD_RESOURCE_META["ui"]["permissions"] == {
-        "clipboardWrite": {}
-    }
+    async with Client(server) as client:
+        extensions = client.server_capabilities.extensions
+    assert extensions == {"io.modelcontextprotocol/ui": {}}
+    assert DASHBOARD_RESOURCE_META["ui"]["permissions"] == {"clipboardWrite": {}}
     assert DASHBOARD_RESOURCE_META["openai/widgetCSP"]["connect_domains"] == [
         "ws://127.0.0.1:*",
         "http://127.0.0.1:*",
@@ -76,47 +73,41 @@ def test_virtual_computer_tools_resource_and_extension_are_registered() -> None:
 
 async def test_virtual_computer_html_is_self_contained() -> None:
     server = create_server(MockBackend(BackendConfig()), ServerConfig())
-    resource = next(
-        resource
-        for resource in server._resource_manager.list_resources()
-        if str(resource.uri) == DASHBOARD_URI
-    )
-    html = await resource.read()
+    contents = await server.read_resource(DASHBOARD_URI)
+    html = next(iter(contents)).content
 
     assert isinstance(html, str)
     assert "Virtual Computer" in html
     assert "Interactive 3D laptop on a desk" in html
     assert "Request Received" not in html
     assert "No operations will be simulated" not in html
-    assert 'pathname="/audio"' in html
+    assert '/websockify$/,"/audio"' in html
     assert "AudioContext" in html
     assert "clipboardPasteFrom" in html
     assert 'addEventListener("clipboard"' in html
     assert "navigator.clipboard.readText" in html
     assert "navigator.clipboard.writeText" in html
     assert '"runtime_status"' in html
-    assert 'window.parent!==window' in html
+    assert "window.parent!==window" in html
     assert "<script src=" not in html
     assert "<link rel=" not in html
 
 
-def test_lifecycle_management_tools_are_app_only_by_default() -> None:
+async def test_lifecycle_management_tools_are_app_only_by_default() -> None:
     server = create_server(
         MockBackend(BackendConfig()),
         ServerConfig(desktop_environment=False),
     )
 
-    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
-    resources = server._resource_manager.list_resources()
-    capabilities = server._mcp_server.create_initialization_options().capabilities
-    payload = capabilities.model_dump(by_alias=True, exclude_none=True)
+    tools = {tool.name: tool for tool in await server.list_tools()}
+    resources = await server.list_resources()
+    async with Client(server) as client:
+        extensions = client.server_capabilities.extensions
 
     for name in ("runtime_status", "set_network_access", "set_desktop_environment"):
         assert tools[name].meta == {"ui": {"visibility": ["app"]}}
     assert len(resources) == 1
-    assert payload["extensions"] == {
-        "io.modelcontextprotocol/ui": {"mimeTypes": [DASHBOARD_MIME_TYPE]}
-    }
+    assert extensions == {"io.modelcontextprotocol/ui": {}}
 
 
 def test_dashboard_resource_meta_adds_exact_loopback_origins() -> None:
@@ -131,12 +122,12 @@ def test_dashboard_resource_meta_adds_exact_loopback_origins() -> None:
     ]
 
 
-def test_lifecycle_tools_add_model_visibility_when_enabled() -> None:
+async def test_lifecycle_tools_add_model_visibility_when_enabled() -> None:
     server = create_server(
         MockBackend(BackendConfig()),
         ServerConfig(expose_lifecycle_tools=True),
     )
-    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+    tools = {tool.name: tool for tool in await server.list_tools()}
 
     assert {"runtime_status", "set_network_access", "set_desktop_environment"} <= set(
         tools
@@ -147,7 +138,7 @@ def test_lifecycle_tools_add_model_visibility_when_enabled() -> None:
     assert tools["runtime_status"].meta == expected
 
 
-def test_only_computer_ui_exposes_the_mcp_app_in_desktop_mode() -> None:
+async def test_only_computer_ui_exposes_the_mcp_app_in_desktop_mode() -> None:
     server = create_server(
         MockBackend(BackendConfig()),
         ServerConfig(
@@ -155,7 +146,7 @@ def test_only_computer_ui_exposes_the_mcp_app_in_desktop_mode() -> None:
             expose_lifecycle_tools=True,
         ),
     )
-    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+    tools = {tool.name: tool for tool in await server.list_tools()}
 
     app_tools = {
         name
@@ -171,7 +162,7 @@ async def _ok(request):
     return JSONResponse({"ok": True})
 
 
-def test_bearer_middleware_protects_only_mcp_route() -> None:
+def test_bearer_middleware_protects_sensitive_routes() -> None:
     app = Starlette(
         routes=[
             Route("/", _ok),
