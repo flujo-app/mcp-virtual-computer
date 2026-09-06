@@ -26,6 +26,7 @@ from mcp.client import Client
 from mcp.client.stdio import StdioServerParameters
 
 import kilntainers
+from kilntainers.backends.docker import DockerBackend, DockerBackendConfig
 
 IMAGE = "debian:bookworm-slim"
 SMOKE_LABEL = "kilntainers.smoke-run"
@@ -260,29 +261,21 @@ async def terminate_and_delete(parameters, computer_id: str, run_id: str) -> Non
         assert process.stderr is not None
         await process.stderr.read()
 
-    deletion_parameters = parameters.model_copy(
-        update={"env": {**(parameters.env or {}), "EXPOSE_LIFECYCLE_TOOLS": "true"}}
-    )
-    async with Client(
-        deletion_parameters, mode="legacy", read_timeout_seconds=90
-    ) as client:
-        # Verify generated-name, immutable-ID and ownership boundaries immediately
-        # before the explicitly destructive MCP operation.
-        record = inspect_fixture(computer_id, run_id)
-        if record is None or record["Id"] != container_id:
-            raise RuntimeError("Fixture identity changed before explicit deletion")
-        result = await call(client, "computer_delete", {"computer_id": computer_id})
-        if (
-            result.get("deleted") is not True
-            or inspect_fixture(computer_id, run_id) is not None
-        ):
-            raise RuntimeError("MCP deletion returned before actual Docker removal")
+    # This application intentionally exposes no destructive MCP tool. Exercise
+    # explicit deletion through the installed backend's public API instead.
+    record = inspect_fixture(computer_id, run_id)
+    if record is None or record["Id"] != container_id:
+        raise RuntimeError("Fixture identity changed before explicit deletion")
+    backend = DockerBackend(DockerBackendConfig())
+    deleted = await backend.delete_computer(computer_id)
+    if deleted is not True or inspect_fixture(computer_id, run_id) is not None:
+        raise RuntimeError("Backend deletion returned before actual Docker removal")
     print(
         json.dumps(
             {
                 "sigterm_open_stdin": "passed",
                 "permanent_survived": True,
-                "explicit_mcp_deletion_confirmed": True,
+                "explicit_backend_deletion_confirmed": True,
                 "container_id": container_id,
             }
         )
