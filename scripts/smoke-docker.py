@@ -260,7 +260,12 @@ async def terminate_and_delete(parameters, computer_id: str, run_id: str) -> Non
         assert process.stderr is not None
         await process.stderr.read()
 
-    async with Client(parameters, mode="legacy", read_timeout_seconds=90) as client:
+    deletion_parameters = parameters.model_copy(
+        update={"env": {**(parameters.env or {}), "EXPOSE_LIFECYCLE_TOOLS": "true"}}
+    )
+    async with Client(
+        deletion_parameters, mode="legacy", read_timeout_seconds=90
+    ) as client:
         # Verify generated-name, immutable-ID and ownership boundaries immediately
         # before the explicitly destructive MCP operation.
         record = inspect_fixture(computer_id, run_id)

@@ -132,7 +132,7 @@ cli.main()
         if fail:
             assert process.returncode != 0, "Failed cleanup must not report success"
         else:
-            assert process.returncode == 0
+            assert process.returncode == 0, process.stderr.read()
             assert time.monotonic() - started >= 6.25
             assert events.count("begin") >= 1
             assert events.count("complete") == events.count("begin"), events

@@ -449,7 +449,7 @@ def main() -> None:
         # A forced successful exit could hide failed or unfinished cleanup.
         def _handle_sigterm(signum: int, frame: object) -> None:
             stop_stdin()
-            os.kill(os.getpid(), signal.SIGINT)
+            signal.raise_signal(signal.SIGINT)
 
         async def _run_stdio() -> None:
             # asyncio.Runner has installed its cancellation handler by this point.
