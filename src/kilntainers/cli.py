@@ -6,9 +6,11 @@ import os
 import signal
 import socket
 import sys
-import threading
+from collections.abc import Callable
 from dataclasses import replace
-from typing import NoReturn
+from types import FrameType
+from typing import Any, NoReturn, cast
+from urllib.parse import urlsplit
 
 from kilntainers.auth import BearerTokenMiddleware
 from kilntainers.backends import (
@@ -18,7 +20,8 @@ from kilntainers.backends import (
 from kilntainers.computers import validate_computer_id
 from kilntainers.config import BackendConfig, ServerConfig, env_flag
 from kilntainers.errors import BackendError
-from kilntainers.server import create_server
+from kilntainers.server import create_http_app, create_server
+from kilntainers.stdio_input import interruptible_stdin
 
 # Sentinel for detecting unset HTTP-only arguments
 _UNSET = object()
@@ -83,16 +86,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max combined stdout+stderr bytes per exec (default: 2097152 = 2 MiB)",
     )
     core.add_argument(
-        "--session-timeout",
-        type=int,
-        default=_UNSET,
-        help="Idle session timeout in seconds (default: 300, HTTP mode only)",
+        "--allowed-host",
+        action="append",
+        default=[],
+        help="Additional trusted HTTP Host value (host[:port]); repeat for a proxy.",
+    )
+    core.add_argument(
+        "--allowed-origin",
+        action="append",
+        default=[],
+        help="Additional exact trusted HTTP(S) browser origin; repeat as needed.",
     )
     core.add_argument(
         "--auth-token",
         default=os.getenv("KILNTAINERS_AUTH_TOKEN"),
         help=(
-            "Static bearer token for the /mcp HTTP route "
+            "Static bearer token for MCP and sensitive companion HTTP routes "
             "(default: KILNTAINERS_AUTH_TOKEN)"
         ),
     )
@@ -161,7 +170,6 @@ def build_configs(
     # Handle HTTP-only args that may be _UNSET
     host = "127.0.0.1" if args.host is _UNSET else args.host
     port = 8435 if args.port is _UNSET else args.port
-    session_timeout = 300 if args.session_timeout is _UNSET else args.session_timeout
 
     server_config = ServerConfig(
         transport=args.transport,
@@ -178,7 +186,8 @@ def build_configs(
         ),
         tool_instruction_override=args.tool_instruction_override,
         extended_tool_instruction=args.extended_tool_instruction,
-        session_timeout=session_timeout,
+        allowed_http_hosts=tuple(args.allowed_host),
+        allowed_http_origins=tuple(args.allowed_origin),
         auth_token=args.auth_token,
         allow_unauthenticated_http=args.allow_unauthenticated_http,
     )
@@ -238,6 +247,27 @@ def validate_config(server_config: ServerConfig) -> None:
             "the backend default."
         )
 
+    for origin in server_config.allowed_http_origins:
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or "*" in origin
+        ):
+            _startup_error(
+                "--allowed-origin must be an exact HTTP(S) origin without a path."
+            )
+    for host in server_config.allowed_http_hosts:
+        if not host or any(char in host for char in "/@?#* \t\r\n"):
+            _startup_error(
+                "--allowed-host must be a literal host[:port], without wildcards."
+            )
+
     # Timeout must be positive
     if server_config.default_timeout < 1:
         _startup_error("--timeout must be at least 1 second.")
@@ -247,7 +277,9 @@ def validate_config(server_config: ServerConfig) -> None:
         _startup_error("--output-limit must be at least 1 byte.")
 
     if not server_config.computer_id:
-        _startup_error("COMPUTER_ID is required (example: COMPUTER_ID=agent-workstation).")
+        _startup_error(
+            "COMPUTER_ID is required (example: COMPUTER_ID=agent-workstation)."
+        )
     try:
         validate_computer_id(server_config.computer_id)
     except BackendError as error:
@@ -299,7 +331,7 @@ async def _async_main(
     if server_config.transport == "stdio":
         await _run_stdio_with_dashboard(mcp, server_config)
     else:
-        await mcp.run_streamable_http_async()
+        await _run_http(mcp, server_config)
 
 
 def _available_loopback_port() -> int:
@@ -309,17 +341,58 @@ def _available_loopback_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def _protected_http_app(mcp, server_config: ServerConfig):
+    """Apply the same security boundary to HTTP and the stdio companion."""
+    app = create_http_app(mcp, server_config)
+    host = server_config.host
+    if host in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"}:
+        hosts = ("127.0.0.1", "localhost", "[::1]")
+    else:
+        hosts = (f"[{host}]" if ":" in host else host,)
+    origins = tuple(f"http://{item}:{server_config.port}" for item in hosts)
+    app.add_middleware(
+        BearerTokenMiddleware,  # ty: ignore[invalid-argument-type]
+        token=server_config.auth_token,
+        companion_access=server_config.companion_access,
+        allowed_origins=(*origins, *server_config.allowed_http_origins),
+        allow_mcp_capability=True,
+        allow_unauthenticated_mcp=(
+            server_config.transport == "http" and not server_config.auth_token
+        ),
+    )
+    return app
+
+
+async def _run_http(mcp, server_config: ServerConfig) -> None:
+    import uvicorn
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            _protected_http_app(mcp, server_config),
+            host=server_config.host,
+            port=server_config.port,
+            log_level="info",
+            access_log=False,
+            timeout_graceful_shutdown=30,
+        )
+    )
+    await server.serve()
+    if mcp.cleanup_failed is True:
+        raise BackendError("Computer application cleanup did not complete.")
+
+
 async def _run_stdio_with_dashboard(mcp, server_config: ServerConfig) -> None:
     """Serve stdio MCP and a standalone loopback dashboard on one event loop."""
     import uvicorn
 
-    app = mcp.streamable_http_app()
+    app = _protected_http_app(mcp, server_config)
     uvicorn_config = uvicorn.Config(
         app,
         host="127.0.0.1",
         port=server_config.port,
         log_level="warning",
         access_log=False,
+        timeout_graceful_shutdown=30,
     )
     dashboard_server = uvicorn.Server(uvicorn_config)
     dashboard_task = asyncio.create_task(dashboard_server.serve())
@@ -327,12 +400,16 @@ async def _run_stdio_with_dashboard(mcp, server_config: ServerConfig) -> None:
         while not dashboard_server.started:
             if dashboard_task.done():
                 await dashboard_task
-                raise RuntimeError("The standalone dashboard server stopped during startup.")
+                raise RuntimeError(
+                    "The standalone dashboard server stopped during startup."
+                )
             await asyncio.sleep(0.01)
         await mcp.run_stdio_async()
     finally:
         dashboard_server.should_exit = True
         await dashboard_task
+        if mcp.cleanup_failed is True:
+            raise BackendError("Computer application cleanup did not complete.")
 
 
 def main() -> None:
@@ -367,45 +444,46 @@ def main() -> None:
     except BackendError as e:
         _startup_error(str(e))
 
-    # Register SIGTERM handler to convert to SIGINT for clean shutdown
-    # FastMCP handles SIGINT (Ctrl+C) gracefully, so we redirect SIGTERM to the same path
-    def _handle_sigterm(signum: int, frame: object) -> None:
-        """
-        Convert SIGTERM to SIGINT for clean shutdown (triggers mcp library graceful shutdown).
+    with interruptible_stdin(server_config.transport == "stdio") as stop_stdin:
+        # Route termination through asyncio cancellation and awaited lifespan cleanup.
+        # A forced successful exit could hide failed or unfinished cleanup.
+        def _handle_sigterm(signum: int, frame: object) -> None:
+            stop_stdin()
+            signal.raise_signal(signal.SIGINT)
 
-        Watchdog timmer needed as `mcp` library doesn't exit on SIGTERM.
+        async def _run_stdio() -> None:
+            # asyncio.Runner has installed its cancellation handler by this point.
+            # Wake the file reader, then preserve that normal cancellation path.
+            runner_handler = signal.getsignal(signal.SIGINT)
 
-        `mcp` library is adding sigterm support, but not in a release yet.
-        """
-        # Schedule forced exit as fallback in case graceful shutdown hangs.
-        # Uses a daemon thread so it won't block normal exit if shutdown succeeds.
-        timer = threading.Timer(5.0, lambda: os._exit(0))
-        timer.daemon = True
-        timer.start()
-        os.kill(os.getpid(), signal.SIGINT)
+            def _handle_sigint(signum: int, frame: FrameType | None) -> None:
+                stop_stdin()
+                if callable(runner_handler):
+                    cast(Callable[[int, FrameType | None], Any], runner_handler)(
+                        signum, frame
+                    )
+                else:
+                    signal.default_int_handler(signum, frame)
 
-    signal.signal(signal.SIGTERM, _handle_sigterm)
-    if hasattr(signal, "SIGBREAK"):
-        signal.signal(signal.SIGBREAK, _handle_sigterm)
+            signal.signal(signal.SIGINT, _handle_sigint)
+            try:
+                await _run_stdio_with_dashboard(mcp, server_config)
+            finally:
+                signal.signal(signal.SIGINT, runner_handler)
 
-    try:
-        if server_config.transport == "stdio":
-            asyncio.run(_run_stdio_with_dashboard(mcp, server_config))
-        elif server_config.auth_token:
-            import uvicorn
-
-            app = mcp.streamable_http_app()
-            app.add_middleware(
-                BearerTokenMiddleware,  # ty: ignore[invalid-argument-type]
-                token=server_config.auth_token,
-            )
-            uvicorn.run(
-                app,
-                host=server_config.host,
-                port=server_config.port,
-                log_level="info",
-            )
-        else:
-            mcp.run(transport="streamable-http")
-    except KeyboardInterrupt:
-        pass  # Clean exit on Ctrl+C
+        handlers = {signal.SIGTERM: _handle_sigterm}
+        if hasattr(signal, "SIGBREAK"):
+            handlers[signal.SIGBREAK] = _handle_sigterm
+        previous = {
+            sig: signal.signal(sig, handler) for sig, handler in handlers.items()
+        }
+        try:
+            if server_config.transport == "stdio":
+                asyncio.run(_run_stdio())
+            else:
+                asyncio.run(_run_http(mcp, server_config))
+        except KeyboardInterrupt:
+            pass  # Lifespan cleanup completed during asyncio runner shutdown.
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)

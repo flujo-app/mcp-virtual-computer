@@ -40,7 +40,6 @@ def test_parser_defaults():
     assert args.port is _UNSET
     assert args.timeout == 120
     assert args.output_limit == 2_097_152
-    assert args.session_timeout is _UNSET
     assert args.tool_instruction_override is None
     assert args.extended_tool_instruction is None
     assert args.engine == "docker"
@@ -67,8 +66,6 @@ def test_parser_core_args():
             "300",
             "--output-limit",
             "1048576",
-            "--session-timeout",
-            "600",
         ]
     )
 
@@ -77,7 +74,6 @@ def test_parser_core_args():
     assert args.port == 9090
     assert args.timeout == 300
     assert args.output_limit == 1_048_576
-    assert args.session_timeout == 600
 
 
 def test_parser_tool_description_args():
@@ -185,7 +181,6 @@ def test_build_configs_default_args(monkeypatch):
     assert server_config.port == 8435
     assert server_config.default_timeout == 120
     assert server_config.output_limit == 2_097_152
-    assert server_config.session_timeout == 300
     assert server_config.tool_instruction_override is None
     assert server_config.extended_tool_instruction is None
     assert server_config.computer_id == "test-computer"
@@ -218,8 +213,6 @@ def test_build_configs_custom_args():
             "300",
             "--output-limit",
             "1048576",
-            "--session-timeout",
-            "600",
             "--engine",
             "podman",
             "--image",
@@ -245,7 +238,6 @@ def test_build_configs_custom_args():
     assert server_config.port == 9090
     assert server_config.default_timeout == 300
     assert server_config.output_limit == 1_048_576
-    assert server_config.session_timeout == 600
 
     # Docker config
     assert docker_config.engine == "podman"
@@ -357,8 +349,9 @@ def test_build_configs_network_flag():
     assert docker_config.network_enabled is True
 
 
-def test_build_configs_no_network_flag():
-    """Test that --no-network explicitly disables network access."""
+def test_build_configs_no_network_flag(monkeypatch):
+    """Test the CLI network default without an overriding deployment env value."""
+    monkeypatch.delenv("NETWORK_ACCESS", raising=False)
     parser = build_parser()
     args = parser.parse_args(["--no-network"])
 
@@ -394,13 +387,10 @@ def test_validate_config_stdio_mode_accepts_dashboard_port():
     validate_config(server_config)
 
 
-def test_validate_config_stdio_mode_accepts_dashboard_session_timeout():
-    """The stdio companion exposes the regular HTTP session timeout."""
-    parser = build_parser()
-    args = parser.parse_args(["--session-timeout", "600"])
-    server_config, _docker_config = build_configs(args)
-
-    validate_config(server_config)
+def test_removed_session_timeout_is_rejected():
+    """Reject the old no-op instead of claiming idle cleanup is configured."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--session-timeout", "600"])
 
 
 def test_validate_config_http_mode_no_error():
@@ -631,25 +621,25 @@ async def test_async_main_successful_startup():
 
 @pytest.mark.asyncio
 async def test_async_main_transport_mapping():
-    """Test that CLI transport maps to correct FastMCP transport string."""
+    """Test that HTTP startup always uses the protected application wrapper."""
     server_config = ServerConfig(transport="http")
     docker_config = DockerBackendConfig()
 
     mock_backend = MagicMock()
 
     mock_mcp = MagicMock()
-    mock_mcp.run_streamable_http_async = AsyncMock()
 
     with (
         patch("kilntainers.cli.get_backend_class") as mock_get_backend,
         patch("kilntainers.cli.create_server") as mock_create_server,
+        patch("kilntainers.cli._run_http", new_callable=AsyncMock) as mock_run_http,
     ):
         mock_get_backend.return_value = lambda _: mock_backend
         mock_create_server.return_value = mock_mcp
 
         await _async_main(server_config, docker_config, "docker")
 
-        mock_mcp.run_streamable_http_async.assert_awaited_once_with()
+        mock_run_http.assert_awaited_once_with(mock_mcp, server_config)
 
 
 # ================
@@ -719,3 +709,37 @@ def test_docker_and_fly_backends_are_exposed():
     assert get_backend_class("fly").__name__ == "FlyBackend"
     with pytest.raises(KeyError, match="Available backends: docker, fly"):
         get_backend_class("modal")
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["https://evil.example/path", "*", "null", "https://user:pass@example.com"],
+)
+def test_reject_invalid_allowed_origin(origin):
+    with pytest.raises(SystemExit):
+        validate_config(ServerConfig(allowed_http_origins=(origin,)))
+
+
+@pytest.mark.parametrize(
+    "host", ["*.example.com", "evil.example/path", "user@host", "bad host"]
+)
+def test_reject_invalid_allowed_host(host):
+    with pytest.raises(SystemExit):
+        validate_config(ServerConfig(allowed_http_hosts=(host,)))
+
+
+def test_parse_explicit_reverse_proxy_boundaries():
+    args = build_parser().parse_args(
+        [
+            "--transport",
+            "http",
+            "--allowed-host",
+            "computer.example.com",
+            "--allowed-origin",
+            "https://computer.example.com",
+        ]
+    )
+    config, _ = build_configs(args)
+    assert config.allowed_http_hosts == ("computer.example.com",)
+    assert config.allowed_http_origins == ("https://computer.example.com",)
+    validate_config(config)

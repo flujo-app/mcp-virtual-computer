@@ -1,6 +1,5 @@
 import { App } from "@modelcontextprotocol/ext-apps";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import RFB from "@novnc/novnc";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -1262,8 +1261,7 @@ let desktopAudioReconnectTimer: number | undefined;
 
 function audioUrlForDesktop(vncUrl: string) {
   const audioUrl = new URL(vncUrl);
-  audioUrl.pathname = "/audio";
-  audioUrl.search = "";
+  audioUrl.pathname = audioUrl.pathname.replace(/\/websockify$/, "/audio");
   audioUrl.hash = "";
   return audioUrl.toString();
 }
@@ -2343,6 +2341,18 @@ sceneCanvas.addEventListener("contextmenu", (event) => {
 resize();
 animate();
 
+// The server supplies an ephemeral capability only through an authorized tool.
+// Keep it in memory after initial navigation so it is not sent as a referrer.
+const computerAccess = new URL(window.location.href).searchParams.get("computer_access");
+if (computerAccess && window.parent === window) {
+  const cleanUrl = new URL(window.location.href);
+  cleanUrl.searchParams.delete("computer_access");
+  window.history.replaceState(null, "", cleanUrl);
+}
+function companionHeaders(): Record<string, string> {
+  return computerAccess ? { "X-Computer-Access": computerAccess } : {};
+}
+
 async function connectDirectLocalServer() {
   const standaloneHost = ["127.0.0.1", "localhost", "[::1]"].includes(window.location.hostname);
   if (
@@ -2350,12 +2360,16 @@ async function connectDirectLocalServer() {
     || !/^https?:$/.test(window.location.protocol)
     || !standaloneHost
     || !window.location.pathname.endsWith("/dashboard.html")
+    || !computerAccess
   ) return;
   const client = new Client(
     { name: "mcp-virtual-computer-browser", version: "0.2.2" },
-    { capabilities: {} },
+    { capabilities: {}, versionNegotiation: { mode: "auto" } },
   );
-  const transport = new StreamableHTTPClientTransport(new URL("/mcp", window.location.origin));
+  const transport = new StreamableHTTPClientTransport(
+    new URL("/mcp", window.location.origin),
+    { requestInit: { headers: companionHeaders() } },
+  );
   try {
     await client.connect(transport);
     const result = await client.callTool({ name: "computer_ui", arguments: {} });
@@ -2392,7 +2406,9 @@ async function pollActivity() {
   activityPollInFlight = true;
   try {
     const after = activityRevision ?? 0;
-    const response = await fetch(`/activity?after=${after}`, { cache: "no-store" });
+    const response = await fetch(`/activity?after=${after}`, {
+      cache: "no-store", headers: companionHeaders(), referrerPolicy: "no-referrer",
+    });
     if (!response.ok) return;
     const feed = await response.json() as { revision: number; events: ActivityEvent[] };
     if (activityRevision === undefined) {

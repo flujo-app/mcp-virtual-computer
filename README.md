@@ -79,6 +79,46 @@ additionally exposes:
 
 The MCP App can always call `runtime_status`, `set_network_access`, and `set_desktop_environment`. Set `EXPOSE_LIFECYCLE_TOOLS=true` to additionally expose those lifecycle controls to the model; they remain model-hidden by default.
   
+## Protocol, HTTP access, and persistence
+
+The server uses the official Python MCP SDK 2.1.1 and serves protocol
+2026-07-28 (`server/discover`) as well as SDK-supported legacy clients. Stdio
+remains supported. The standalone browser uses the TypeScript SDK v2 client;
+the embedded MCP App uses its host bridge. MCP Apps support is advertised
+through the SDK's public extension API.
+
+Each server is a trusted, single-computer service selected by `COMPUTER_ID`.
+Clients of the same server share that computer; protocol connections are not
+tenant boundaries. The computer and its files survive MCP disconnects and
+ordinary server shutdown. No connection creates a disposable computer.
+The old `--session-timeout` option has been removed because it never enforced
+idle cleanup. Remove it from existing launch configurations. Command execution
+deadlines still use `--timeout` or the tool's `timeout` argument.
+
+The stdio companion binds to loopback. `computer_ui` returns a dashboard URL
+with a fresh, process-scoped browser capability. Open that complete URL; a bare
+`/dashboard.html` URL is intentionally unauthorized. The page removes the
+capability from its address bar and uses a header for activity/MCP requests.
+Desktop WebSockets use the capability in their URL. Do not share these URLs.
+They expire when the MCP server process exits. Embedded Apps access tools via
+the host bridge; an opaque iframe Origin is accepted on desktop WebSockets
+only with the valid capability.
+
+HTTP mode supports a static bearer configured by `KILNTAINERS_AUTH_TOKEN` or
+`--auth-token`, including protection of sensitive companion routes. A listener
+outside loopback requires that token unless explicitly deployed behind a
+trusted authentication proxy with `--allow-unauthenticated-http`. This is a
+static-token deployment mode, not an OAuth authorization server. Use TLS at
+the reverse proxy for remote access. Supply its exact request Host and browser
+Origin with repeatable `--allowed-host` and `--allowed-origin` options; wildcard
+origins and untrusted browser origins are rejected. Health status at `/healthz`
+remains public and contains no computer state.
+
+Activity history keeps bounded operation metadata and byte counts, not raw
+commands, stdin, file contents, output, or browser capability URLs. HTTP access
+logs are disabled to keep capability query parameters out of request logs;
+protected responses use `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+
 ## Architecture
 <img width="1800" height="1040" alt="image" src="https://github.com/user-attachments/assets/acfa2e14-f5ec-4d88-9efe-fa92e0dd2a9a" />
 

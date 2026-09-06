@@ -29,7 +29,6 @@ class TestServerConfig:
         assert config.network_access is True
         assert config.expose_lifecycle_tools is False
         assert config.workspace_directory == "/workspace"
-        assert config.session_timeout == 300
 
     def test_custom_values(self) -> None:
         """Custom values should be stored correctly."""
@@ -45,7 +44,6 @@ class TestServerConfig:
             desktop_environment=True,
             network_access=False,
             expose_lifecycle_tools=True,
-            session_timeout=600,
         )
         assert config.transport == "http"
         assert config.host == "0.0.0.0"
@@ -58,7 +56,6 @@ class TestServerConfig:
         assert config.desktop_environment is True
         assert config.network_access is False
         assert config.expose_lifecycle_tools is True
-        assert config.session_timeout == 600
 
     def test_frozen_immutable(self) -> None:
         """ServerConfig should be frozen (immutable)."""

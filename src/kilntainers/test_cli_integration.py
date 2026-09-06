@@ -55,7 +55,7 @@ class TestCLIStartup:
         # Check for HTTP-only args (present in help even though they error in stdio mode)
         assert "--host" in help_text
         assert "--port" in help_text
-        assert "--session-timeout" in help_text
+        assert "--session-timeout" not in help_text
 
         # Check for tool description args
         assert "--tool-instruction-override" in help_text

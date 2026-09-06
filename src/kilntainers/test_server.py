@@ -3,12 +3,19 @@
 import asyncio
 import json
 import os
+import queue
 import signal
+import subprocess
+import sys
+import threading
 from typing import cast
 from unittest.mock import MagicMock
+from urllib.parse import parse_qs, urlsplit
 
 import certifi
 import pytest
+from mcp import Client
+from starlette.testclient import TestClient
 from websockets.typing import Subprotocol
 
 from kilntainers.backends.base import ExecResult
@@ -17,11 +24,13 @@ from kilntainers.config import BackendConfig, ServerConfig
 from kilntainers.errors import BackendError
 from kilntainers.server import (
     SessionContext,
+    _activity_snapshot,
     _computer_desktop_proxy_url,
     _computer_ui_url,
     _connect_desktop_websocket,
     _create_handler,
     assemble_tool_description,
+    create_http_app,
     create_lifespan,
     create_server,
 )
@@ -30,7 +39,15 @@ from kilntainers.server import (
 
 
 def test_computer_ui_url_uses_standalone_dashboard_for_stdio() -> None:
-    assert _computer_ui_url(ServerConfig()) == "http://127.0.0.1:8435/dashboard.html"
+    config = ServerConfig()
+    url = _computer_ui_url(config)
+    assert (
+        urlsplit(url)._replace(query="").geturl()
+        == "http://127.0.0.1:8435/dashboard.html"
+    )
+    assert parse_qs(urlsplit(url).query)["computer_access"] == [
+        config.companion_access.token
+    ]
 
 
 def test_computer_ui_url_uses_reachable_http_dashboard() -> None:
@@ -40,20 +57,26 @@ def test_computer_ui_url_uses_reachable_http_dashboard() -> None:
         port=4173,
     )
 
-    assert _computer_ui_url(config) == "http://127.0.0.1:4173/dashboard.html"
+    assert (
+        urlsplit(_computer_ui_url(config))._replace(query="").geturl()
+        == "http://127.0.0.1:4173/dashboard.html"
+    )
 
 
 def test_computer_ui_url_brackets_ipv6_hosts() -> None:
     config = ServerConfig(transport="http", host="::1", port=4173)
 
-    assert _computer_ui_url(config) == "http://[::1]:4173/dashboard.html"
+    assert (
+        urlsplit(_computer_ui_url(config))._replace(query="").geturl()
+        == "http://[::1]:4173/dashboard.html"
+    )
 
 
 def test_computer_desktop_proxy_url_uses_exact_server_port() -> None:
     config = ServerConfig(transport="stdio", port=43123)
 
     assert (
-        _computer_desktop_proxy_url(config)
+        urlsplit(_computer_desktop_proxy_url(config))._replace(query="").geturl()
         == "ws://127.0.0.1:43123/desktop/websockify"
     )
 
@@ -132,7 +155,7 @@ def mock_backend() -> MockBackend:
 
 @pytest.fixture
 async def mock_context(mock_backend: MockBackend) -> MagicMock:
-    """Return a mock FastMCP Context for testing.
+    """Return a mock MCPServer Context for testing.
 
     Pre-creates the sandbox so handler tests can configure exec results
     before calling the handler.
@@ -316,7 +339,7 @@ async def test_handler_success_command(
 
     result = await handler(command="echo hello", ctx=mock_context)
 
-    assert result.isError is False
+    assert result.is_error is False
     content = result.content[0]
     assert content.type == "text"
 
@@ -345,7 +368,7 @@ async def test_handler_failed_command(
 
     result = await handler(command="nonexistent", ctx=mock_context)
 
-    assert result.isError is False
+    assert result.is_error is False
     response_json = json.loads(result.content[0].text)
     assert response_json["exit_code"] == 127
     assert response_json["stderr"] == "command not found\n"
@@ -364,7 +387,7 @@ async def test_handler_timeout_result(
 
     result = await handler(command="sleep 300", ctx=mock_context)
 
-    assert result.isError is False
+    assert result.is_error is False
     response_json = json.loads(result.content[0].text)
     assert response_json["exit_code"] == 124
 
@@ -382,7 +405,7 @@ async def test_handler_output_limit_result(
 
     result = await handler(command="yes", ctx=mock_context)
 
-    assert result.isError is False
+    assert result.is_error is False
     response_json = json.loads(result.content[0].text)
     assert response_json["exit_code"] == 1
 
@@ -414,8 +437,8 @@ async def test_response_json_contains_all_fields(
         "stdout",
         "stderr",
         "exit_code",
-            "exec_duration_ms",
-            "network_access",
+        "exec_duration_ms",
+        "network_access",
     }
     assert response_json["stdout"] == "out"
     assert response_json["stderr"] == "err"
@@ -435,7 +458,7 @@ async def test_handler_invalid_inputs(server_config: ServerConfig) -> None:
 
     result = await handler(command="ls", args=["/bin/ls"], ctx=None)
 
-    assert result.isError is True
+    assert result.is_error is True
     assert "Cannot provide both" in result.content[0].text
 
 
@@ -453,7 +476,7 @@ async def test_handler_sandbox_died_error(
 
     result = await handler(command="test", ctx=mock_context)
 
-    assert result.isError is True
+    assert result.is_error is True
     assert "died" in result.content[0].text.lower()
 
 
@@ -463,7 +486,7 @@ async def test_handler_no_context_error(server_config: ServerConfig) -> None:
 
     result = await handler(command="ls", ctx=None)
 
-    assert result.isError is True
+    assert result.is_error is True
     assert "no context provided" in result.content[0].text
 
 
@@ -619,7 +642,9 @@ async def test_lifespan_cancels_death_task_on_exit(mock_backend: MockBackend) ->
     assert death_task.cancelled()
 
 
-async def test_lifespan_keeps_persistent_sandbox_on_exit(mock_backend: MockBackend) -> None:
+async def test_lifespan_keeps_persistent_sandbox_on_exit(
+    mock_backend: MockBackend,
+) -> None:
     """Session cleanup releases but does not stop the persistent computer."""
     lifespan_fn = create_lifespan(mock_backend, "stdio")
     mock_server = MagicMock()
@@ -822,7 +847,7 @@ async def test_handler_backend_error_on_lazy_creation(
 
     result = await handler(command="test", ctx=ctx)
 
-    assert result.isError is True
+    assert result.is_error is True
     assert "mock creation failure" in result.content[0].text
 
 
@@ -843,33 +868,34 @@ async def test_session_context_death_monitor_starts_after_creation(
 # --- Server Factory Tests ---
 
 
-def test_create_server_returns_fastmcp(mock_backend: MockBackend) -> None:
-    """create_server() returns a FastMCP instance."""
+def test_create_server_returns_mcpserver(mock_backend: MockBackend) -> None:
+    """create_server() returns a MCPServer instance."""
     config = ServerConfig()
     server = create_server(mock_backend, config)
 
-    # Just verify it's a FastMCP instance with expected attributes
+    # Just verify it's a MCPServer instance with expected attributes
     assert hasattr(server, "name")
     assert server.name == "MCP Virtual Computer"
 
 
 def test_create_server_with_lifespan(mock_backend: MockBackend) -> None:
-    """create_server() creates FastMCP instance with lifespan configured."""
+    """create_server() creates MCPServer instance with lifespan configured."""
     config = ServerConfig(transport="stdio")
     server = create_server(mock_backend, config)
 
-    # Verify a FastMCP instance was created
+    # Verify a MCPServer instance was created
     assert server.name == "MCP Virtual Computer"
 
 
-def test_create_server_with_override_description(mock_backend: MockBackend) -> None:
+async def test_create_server_with_override_description(
+    mock_backend: MockBackend,
+) -> None:
     """Tool description uses override when provided."""
     config = ServerConfig(tool_instruction_override="Custom override")
     server = create_server(mock_backend, config)
 
-    # The tool should be registered with the override description
-    # FastMCP stores tools in _tool_manager
-    assert hasattr(server, "_tool_manager")
+    tools = {tool.name: tool for tool in await server.list_tools()}
+    assert tools["terminal_execute"].description == "Custom override"
 
 
 def test_create_server_raises_on_empty_description() -> None:
@@ -891,7 +917,9 @@ def test_create_server_with_extended_description(mock_backend: MockBackend) -> N
     assert server.name == "MCP Virtual Computer"
 
 
-def test_public_tool_schemas_have_no_lifecycle_selector(mock_backend: MockBackend) -> None:
+async def test_public_tool_schemas_have_no_lifecycle_selector(
+    mock_backend: MockBackend,
+) -> None:
     """Computer identity and persistence are startup configuration only."""
     server = create_server(
         mock_backend,
@@ -901,7 +929,7 @@ def test_public_tool_schemas_have_no_lifecycle_selector(mock_backend: MockBacken
             expose_lifecycle_tools=True,
         ),
     )
-    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+    tools = {tool.name: tool for tool in await server.list_tools()}
 
     assert set(tools) == {
         "terminal_execute",
@@ -915,12 +943,12 @@ def test_public_tool_schemas_have_no_lifecycle_selector(mock_backend: MockBacken
         "runtime_status",
     }
     for tool in tools.values():
-        properties = tool.parameters.get("properties", {})
+        properties = tool.input_schema.get("properties", {})
         assert "computer_id" not in properties
         assert "temporary" not in properties
 
 
-def test_desktop_mode_exposes_screen_and_interaction_surface(
+async def test_desktop_mode_exposes_screen_and_interaction_surface(
     mock_backend: MockBackend,
 ) -> None:
     """Xfce-only inspection and interaction capabilities are conditionally public."""
@@ -928,10 +956,8 @@ def test_desktop_mode_exposes_screen_and_interaction_surface(
         mock_backend,
         ServerConfig(computer_id="fixed-computer", desktop_environment=True),
     )
-    tools = {tool.name for tool in server._tool_manager.list_tools()}
-    resources = {
-        str(resource.uri) for resource in server._resource_manager.list_resources()
-    }
+    tools = {tool.name for tool in await server.list_tools()}
+    resources = {str(resource.uri) for resource in await server.list_resources()}
 
     assert {
         "look_at_screen",
@@ -948,3 +974,233 @@ def test_desktop_mode_exposes_screen_and_interaction_surface(
     } <= tools
     assert "computer://screen/current.png" in resources
     assert "computer://screen/accessibility.json" in resources
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+async def test_sdk_v2_serves_both_protocol_eras(mode: str) -> None:
+    """The same public tools work after modern discovery or legacy initialize."""
+    backend = MockBackend(BackendConfig())
+    server = create_server(
+        backend, ServerConfig(transport="http", desktop_environment=False)
+    )
+    async with Client(server, mode=mode) as client:
+        expected = "2026-07-28" if mode == "auto" else "2025-11-25"
+        assert client.protocol_version == expected
+        catalog = await client.list_tools()
+        assert {tool.name for tool in catalog.tools} >= {
+            "terminal_execute",
+            "read_file",
+        }
+        assert backend.create_count == 0
+        invalid = await client.call_tool("terminal_execute", {})
+        assert invalid.is_error
+        success = await client.call_tool(
+            "terminal_execute",
+            {"command": "echo ready", "stdin": None, "working_directory": None},
+        )
+        assert not success.is_error
+        assert success.structured_content["exit_code"] == 0
+        assert backend.create_count == 1
+
+
+def test_activity_snapshot_does_not_retain_secrets() -> None:
+    secret = "not-for-dashboard"
+    event = _activity_snapshot(
+        "result",
+        "write_file",
+        {
+            "path": "/workspace/note.txt",
+            "command": secret,
+            "args": [secret],
+            "stdin": secret,
+            "content": secret,
+            "old_text": secret,
+            "new_text": secret,
+        },
+        {
+            "path": "/workspace/note.txt",
+            "content": secret,
+            "stdout": secret,
+            "stderr": secret,
+            "desktop_url": "ws://localhost/?computer_access=" + secret,
+            "dashboard_url": "http://localhost/?computer_access=" + secret,
+            "error": secret,
+            "exit_code": 1,
+        },
+    )
+    assert secret not in json.dumps(event)
+    assert event["arguments"] == {"path": "/workspace/note.txt"}
+    assert event["payload"]["stdout_bytes"] == len(secret)
+    assert event["payload"]["status"] == "error"
+
+
+def _rpc_response(response):
+    assert response.status_code == 200, response.text
+    if response.headers["content-type"].startswith("application/json"):
+        return response.json()
+    return [
+        json.loads(line[5:].strip())
+        for line in response.text.splitlines()
+        if line.startswith("data:")
+    ][-1]
+
+
+def test_http_modern_discovery_security_and_activity() -> None:
+    """Exercise actual ASGI wire fields, security rejection and activity retention."""
+    backend = MockBackend(BackendConfig())
+    config = ServerConfig(transport="http", desktop_environment=False)
+    app = create_http_app(create_server(backend, config), config)
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+
+    def rpc(client, method, params=None, extra_headers=None):
+        params = dict(params or {})
+        params["_meta"] = meta
+        headers = {
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": method,
+            "Accept": "application/json, text/event-stream",
+        }
+        if "name" in params:
+            headers["Mcp-Name"] = params["name"]
+        headers.update(extra_headers or {})
+        return client.post(
+            "/mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+        )
+
+    with TestClient(app, base_url=f"http://127.0.0.1:{config.port}") as client:
+        discover = _rpc_response(rpc(client, "server/discover"))
+        assert discover["result"]["resultType"] == "complete"
+        assert "Mcp-Session-Id" not in rpc(client, "server/discover").headers
+        tools = _rpc_response(rpc(client, "tools/list"))["result"]
+        assert tools["resultType"] == "complete"
+        assert "ttlMs" in tools and "cacheScope" in tools
+        assert backend.create_count == 0
+        hostile = rpc(
+            client, "server/discover", extra_headers={"Origin": "https://evil.invalid"}
+        )
+        assert hostile.status_code == 403
+        mismatch = rpc(
+            client, "server/discover", extra_headers={"Mcp-Method": "tools/list"}
+        )
+        assert mismatch.status_code == 400
+        secret = "command-and-stdin-secret"
+        result = _rpc_response(
+            rpc(
+                client,
+                "tools/call",
+                {
+                    "name": "terminal_execute",
+                    "arguments": {"command": secret, "args": [secret], "stdin": secret},
+                },
+            )
+        )
+        assert result["result"]["isError"] is True
+        events = client.get("/activity").json()["events"]
+        assert len(events) == 2
+        assert secret not in json.dumps(events)
+        assert events[-1]["operation"] == "terminal_execute"
+
+
+async def test_headless_resource_reads_fail_before_computer_start() -> None:
+    from mcp.server.mcpserver.exceptions import ResourceNotFoundError
+
+    backend = MockBackend(BackendConfig())
+    server = create_server(backend, ServerConfig(desktop_environment=False))
+    with pytest.raises(ResourceNotFoundError):
+        await server.read_resource("computer://screen/current.png")
+    assert backend.create_count == 0
+
+
+@pytest.mark.parametrize("protocol", ["2026-07-28", "2025-11-25"])
+def test_stdio_process_is_jsonrpc_clean_and_exits_on_eof(protocol: str) -> None:
+    """Exercise real OS pipes, both opening exchanges and graceful stdin closure."""
+    source = "\n".join(
+        [
+            "from kilntainers.server import create_server",
+            "from kilntainers.backends.test_utils import MockBackend",
+            "from kilntainers.config import BackendConfig, ServerConfig",
+            "server = create_server(MockBackend(BackendConfig()), ServerConfig(desktop_environment=False))",
+            "server.run()",
+        ]
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", source],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdin is not None and process.stdout is not None
+    stdin = process.stdin
+    stdout = process.stdout
+    lines: queue.Queue[str] = queue.Queue()
+
+    def read_lines():
+        for line in stdout:
+            lines.put(line)
+
+    reader = threading.Thread(target=read_lines, daemon=True)
+    reader.start()
+
+    def request(method, params, request_id):
+        if protocol == "2026-07-28":
+            params["_meta"] = {
+                "io.modelcontextprotocol/protocolVersion": protocol,
+                "io.modelcontextprotocol/clientCapabilities": {},
+            }
+        message = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        }
+        stdin.write(json.dumps(message) + "\n")
+        stdin.flush()
+        while True:
+            response = json.loads(lines.get(timeout=15))
+            assert response["jsonrpc"] == "2.0"
+            if response.get("id") == request_id:
+                return response
+
+    try:
+        if protocol == "2026-07-28":
+            opening = request("server/discover", {}, 1)
+            assert opening["result"]["resultType"] == "complete"
+        else:
+            opening = request(
+                "initialize",
+                {
+                    "protocolVersion": protocol,
+                    "capabilities": {},
+                    "clientInfo": {"name": "regression-test", "version": "1"},
+                },
+                1,
+            )
+            assert opening["result"]["protocolVersion"] == protocol
+            stdin.write(
+                json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+                + "\n"
+            )
+            stdin.flush()
+        catalog = request("tools/list", {}, 2)
+        assert "terminal_execute" in {
+            tool["name"] for tool in catalog["result"]["tools"]
+        }
+        failure = request(
+            "tools/call", {"name": "terminal_execute", "arguments": {}}, 3
+        )
+        assert failure["result"]["isError"] is True
+        stdin.close()
+        assert process.wait(timeout=15) == 0
+        reader.join(timeout=2)
+        while not lines.empty():
+            assert json.loads(lines.get_nowait())["jsonrpc"] == "2.0"
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
