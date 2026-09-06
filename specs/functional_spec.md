@@ -236,6 +236,11 @@ permanent computer. A later process using the same `COMPUTER_ID` reattaches to
 the persisted computer and workspace. Each process creates a new dashboard
 capability; old browser URLs cease to authorize that server.
 
+SIGTERM and SIGBREAK follow normal cancellation and awaited cleanup. Cleanup
+has a 30-second deadline, is shielded from transport cancellation, and failure
+produces a nonzero process exit. No timer reports successful exit before cleanup
+finishes. Explicit computer deletion remains a separate destructive operation.
+
 ### 4.5 Unexpected computer death
 
 Backend failures surface as tool errors. Stdio's death monitor terminates its

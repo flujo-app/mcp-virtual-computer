@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -188,6 +189,99 @@ async def exercise(computer_id: str, run_id: str, directory: str) -> None:
                 ),
                 flush=True,
             )
+
+    await terminate_and_delete(parameters, computer_id, run_id)
+
+
+async def terminate_and_delete(parameters, computer_id: str, run_id: str) -> None:
+    """SIGTERM must await cleanup while a permanent computer remains available."""
+    record = inspect_fixture(computer_id, run_id)
+    if record is None:
+        raise RuntimeError("Missing owned fixture before signal acceptance")
+    container_id = record["Id"]
+    process = await asyncio.create_subprocess_exec(
+        parameters.command,
+        *parameters.args,
+        env=parameters.env,
+        cwd=parameters.cwd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert process.stdin is not None and process.stdout is not None
+    try:
+        message = {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "tools/call",
+            "params": {
+                "name": "terminal_execute",
+                "arguments": {"command": "printf signal-ready"},
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL,
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                },
+            },
+        }
+        process.stdin.write((json.dumps(message) + "\n").encode())
+        await process.stdin.drain()
+        async with asyncio.timeout(90):
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    raise RuntimeError("CLI ended before signal fixture attached")
+                response = json.loads(line)
+                if response.get("id") == 0:
+                    result = response.get("result", {})
+                    if (
+                        result.get("isError")
+                        or result.get("structuredContent", {}).get("stdout")
+                        != "signal-ready"
+                    ):
+                        raise RuntimeError("Signal fixture command did not complete")
+                    break
+        # Keep stdin open: a signal must not depend on the client providing EOF.
+        process.send_signal(signal.SIGTERM)
+        await asyncio.wait_for(process.wait(), 40)
+        if process.returncode != 0:
+            raise RuntimeError("CLI signal cleanup failed")
+        record = inspect_fixture(computer_id, run_id)
+        if (
+            record is None
+            or record["Id"] != container_id
+            or not record["State"]["Running"]
+        ):
+            raise RuntimeError("SIGTERM removed or replaced the permanent computer")
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+        process.stdin.close()
+        assert process.stderr is not None
+        await process.stderr.read()
+
+    async with Client(parameters, mode="legacy", read_timeout_seconds=90) as client:
+        # Verify generated-name, immutable-ID and ownership boundaries immediately
+        # before the explicitly destructive MCP operation.
+        record = inspect_fixture(computer_id, run_id)
+        if record is None or record["Id"] != container_id:
+            raise RuntimeError("Fixture identity changed before explicit deletion")
+        result = await call(client, "computer_delete", {"computer_id": computer_id})
+        if (
+            result.get("deleted") is not True
+            or inspect_fixture(computer_id, run_id) is not None
+        ):
+            raise RuntimeError("MCP deletion returned before actual Docker removal")
+    print(
+        json.dumps(
+            {
+                "sigterm_open_stdin": "passed",
+                "permanent_survived": True,
+                "explicit_mcp_deletion_confirmed": True,
+                "container_id": container_id,
+            }
+        )
+    )
 
 
 async def main() -> None:

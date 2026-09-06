@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncContextManager, cast
 from urllib.parse import urlsplit
 
+import anyio
 import certifi
 from mcp.server import MCPServer
 from mcp.server.apps import Apps
@@ -457,7 +458,15 @@ def create_lifespan(
         try:
             yield ctx
         finally:
-            await ctx.cleanup()
+            # Transport cancellation must not interrupt ownership release. Permanent
+            # computers deliberately survive this application cleanup.
+            try:
+                with anyio.fail_after(30, shield=True):
+                    await ctx.cleanup()
+            except BaseException:
+                if isinstance(server, VirtualComputerServer):
+                    server.cleanup_failed = True
+                raise
 
     return lifespan
 
@@ -885,6 +894,7 @@ class VirtualComputerServer(MCPServer[SessionContext]):
     """Keep application routes and desktop visibility outside SDK internals."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.cleanup_failed = False
         self.companion_routes: list[BaseRoute] = []
         self.desktop_capabilities_enabled = True
         super().__init__(*args, **kwargs)

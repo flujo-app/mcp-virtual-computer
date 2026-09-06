@@ -6,9 +6,10 @@ import os
 import signal
 import socket
 import sys
-import threading
+from collections.abc import Callable
 from dataclasses import replace
-from typing import NoReturn
+from types import FrameType
+from typing import Any, NoReturn, cast
 from urllib.parse import urlsplit
 
 from kilntainers.auth import BearerTokenMiddleware
@@ -20,6 +21,7 @@ from kilntainers.computers import validate_computer_id
 from kilntainers.config import BackendConfig, ServerConfig, env_flag
 from kilntainers.errors import BackendError
 from kilntainers.server import create_http_app, create_server
+from kilntainers.stdio_input import interruptible_stdin
 
 # Sentinel for detecting unset HTTP-only arguments
 _UNSET = object()
@@ -371,9 +373,12 @@ async def _run_http(mcp, server_config: ServerConfig) -> None:
             port=server_config.port,
             log_level="info",
             access_log=False,
+            timeout_graceful_shutdown=30,
         )
     )
     await server.serve()
+    if mcp.cleanup_failed is True:
+        raise BackendError("Computer application cleanup did not complete.")
 
 
 async def _run_stdio_with_dashboard(mcp, server_config: ServerConfig) -> None:
@@ -387,6 +392,7 @@ async def _run_stdio_with_dashboard(mcp, server_config: ServerConfig) -> None:
         port=server_config.port,
         log_level="warning",
         access_log=False,
+        timeout_graceful_shutdown=30,
     )
     dashboard_server = uvicorn.Server(uvicorn_config)
     dashboard_task = asyncio.create_task(dashboard_server.serve())
@@ -402,6 +408,8 @@ async def _run_stdio_with_dashboard(mcp, server_config: ServerConfig) -> None:
     finally:
         dashboard_server.should_exit = True
         await dashboard_task
+        if mcp.cleanup_failed is True:
+            raise BackendError("Computer application cleanup did not complete.")
 
 
 def main() -> None:
@@ -436,31 +444,46 @@ def main() -> None:
     except BackendError as e:
         _startup_error(str(e))
 
-    # Register SIGTERM handler to convert to SIGINT for clean shutdown
-    # FastMCP handles SIGINT (Ctrl+C) gracefully, so we redirect SIGTERM to the same path
-    def _handle_sigterm(signum: int, frame: object) -> None:
-        """
-        Convert SIGTERM to SIGINT for clean shutdown (triggers mcp library graceful shutdown).
+    with interruptible_stdin(server_config.transport == "stdio") as stop_stdin:
+        # Route termination through asyncio cancellation and awaited lifespan cleanup.
+        # A forced successful exit could hide failed or unfinished cleanup.
+        def _handle_sigterm(signum: int, frame: object) -> None:
+            stop_stdin()
+            os.kill(os.getpid(), signal.SIGINT)
 
-        Watchdog timmer needed as `mcp` library doesn't exit on SIGTERM.
+        async def _run_stdio() -> None:
+            # asyncio.Runner has installed its cancellation handler by this point.
+            # Wake the file reader, then preserve that normal cancellation path.
+            runner_handler = signal.getsignal(signal.SIGINT)
 
-        `mcp` library is adding sigterm support, but not in a release yet.
-        """
-        # Schedule forced exit as fallback in case graceful shutdown hangs.
-        # Uses a daemon thread so it won't block normal exit if shutdown succeeds.
-        timer = threading.Timer(5.0, lambda: os._exit(0))
-        timer.daemon = True
-        timer.start()
-        os.kill(os.getpid(), signal.SIGINT)
+            def _handle_sigint(signum: int, frame: FrameType | None) -> None:
+                stop_stdin()
+                if callable(runner_handler):
+                    cast(Callable[[int, FrameType | None], Any], runner_handler)(
+                        signum, frame
+                    )
+                else:
+                    signal.default_int_handler(signum, frame)
 
-    signal.signal(signal.SIGTERM, _handle_sigterm)
-    if hasattr(signal, "SIGBREAK"):
-        signal.signal(signal.SIGBREAK, _handle_sigterm)
+            signal.signal(signal.SIGINT, _handle_sigint)
+            try:
+                await _run_stdio_with_dashboard(mcp, server_config)
+            finally:
+                signal.signal(signal.SIGINT, runner_handler)
 
-    try:
-        if server_config.transport == "stdio":
-            asyncio.run(_run_stdio_with_dashboard(mcp, server_config))
-        else:
-            asyncio.run(_run_http(mcp, server_config))
-    except KeyboardInterrupt:
-        pass  # Clean exit on Ctrl+C
+        handlers = {signal.SIGTERM: _handle_sigterm}
+        if hasattr(signal, "SIGBREAK"):
+            handlers[signal.SIGBREAK] = _handle_sigterm
+        previous = {
+            sig: signal.signal(sig, handler) for sig, handler in handlers.items()
+        }
+        try:
+            if server_config.transport == "stdio":
+                asyncio.run(_run_stdio())
+            else:
+                asyncio.run(_run_http(mcp, server_config))
+        except KeyboardInterrupt:
+            pass  # Lifespan cleanup completed during asyncio runner shutdown.
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)

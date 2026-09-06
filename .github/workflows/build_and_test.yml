@@ -40,3 +40,19 @@ jobs:
           uv run pytest scripts/test_smoke_docker.py -q
           docker info > /dev/null
           uv run --no-project --with "$(find dist -maxdepth 1 -name '*.whl' -print -quit)" python scripts/smoke-docker.py
+
+  signal-and-pipe:
+    name: Signal and stdio on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+      - run: uv sync --frozen --all-extras --dev
+      - run: uv run --frozen pytest src/kilntainers/test_shutdown.py -q
