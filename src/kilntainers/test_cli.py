@@ -21,7 +21,7 @@ from kilntainers.errors import BackendError
 
 @pytest.fixture(autouse=True)
 def configured_computer_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CLI startup requires its single computer identity from the environment."""
+    """Most CLI tests use an explicitly configured computer identity."""
     monkeypatch.setenv("COMPUTER_ID", "test-computer")
 
 
@@ -165,6 +165,13 @@ def test_parser_invalid_types():
 # ================
 # Config Construction Tests
 # ================
+
+
+def test_missing_computer_id_uses_stable_first_run_default(monkeypatch):
+    monkeypatch.delenv("COMPUTER_ID", raising=False)
+    server_config, _ = build_configs(build_parser().parse_args([]))
+    assert server_config.computer_id == "agent-workstation"
+    validate_config(server_config)
 
 
 def test_build_configs_default_args(monkeypatch):

@@ -169,7 +169,7 @@ def build_configs(
         port=port,
         default_timeout=args.timeout,
         output_limit=args.output_limit,
-        computer_id=os.getenv("COMPUTER_ID", ""),
+        computer_id=os.getenv("COMPUTER_ID", "agent-workstation"),
         desktop_environment=env_flag("DESKTOP_ENVIRONMENT", default=True),
         network_access=env_flag("NETWORK_ACCESS", default=args.network),
         expose_lifecycle_tools=env_flag(
@@ -247,7 +247,7 @@ def validate_config(server_config: ServerConfig) -> None:
         _startup_error("--output-limit must be at least 1 byte.")
 
     if not server_config.computer_id:
-        _startup_error("COMPUTER_ID is required (example: COMPUTER_ID=agent-workstation).")
+        _startup_error("COMPUTER_ID must not be empty. Omit it to use agent-workstation.")
     try:
         validate_computer_id(server_config.computer_id)
     except BackendError as error:

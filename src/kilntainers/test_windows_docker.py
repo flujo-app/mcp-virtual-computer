@@ -15,6 +15,12 @@ from kilntainers.backends.docker import DockerBackend, DockerBackendConfig
 from kilntainers.errors import BackendError
 
 
+@pytest.fixture(autouse=True)
+def mock_wsl_preparation(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Real prerequisite handling is covered in test_windows_wsl; never elevate tests.
+    monkeypatch.setattr(bootstrap, "prepare_windows_wsl", lambda report: None)
+
+
 def test_download_amount_parses_decimal_and_binary_units() -> None:
     assert bootstrap._download_amount(" 12.5 MB / 500 MB ") == (
         12_500_000,
@@ -186,7 +192,7 @@ def test_winget_command_is_exact_silent_per_user_and_streams_bytes(
         "--exact",
     ]
     assert command[command.index("--override") + 1] == (
-        "install --user --quiet --accept-license"
+        "install --user --quiet --accept-license --backend=wsl-2"
     )
     download = next(update for update in updates if update.download_total_bytes)
     assert download.downloaded_bytes == 125_000_000
@@ -209,6 +215,52 @@ def test_process_path_is_updated_without_duplicate(
     assert bootstrap._path_contains(bootstrap.os.environ["PATH"], directory)
     assert bootstrap.os.environ["PATH"].split(";").count(str(directory)) == 1
     persist.assert_called_once_with(directory)
+
+
+def test_prerequisite_failure_stops_before_docker_download(monkeypatch):
+    monkeypatch.setattr(bootstrap.sys, "platform", "win32")
+    monkeypatch.setattr(bootstrap, "_find_docker", lambda engine: (None, False))
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "winget.exe")
+    monkeypatch.delenv("AUTO_INSTALL_DOCKER", raising=False)
+    monkeypatch.setattr(
+        bootstrap,
+        "prepare_windows_wsl",
+        MagicMock(
+            side_effect=BackendError("WSL setup requires a Windows restart."),
+        ),
+    )
+    install = MagicMock()
+    monkeypatch.setattr(bootstrap, "_install_with_winget", install)
+    with pytest.raises(BackendError, match="restart"):
+        bootstrap.prepare_windows_docker_runtime(
+            engine="docker", host=None, report=lambda update: None
+        )
+    install.assert_not_called()
+
+
+def test_winget_failure_includes_current_installer_log(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    log = tmp_path / "Docker" / "install-log.txt"
+    log.parent.mkdir()
+    log.write_text("WSL prerequisite failed", encoding="utf-8")
+    process = _FakePopen([], b"Installer failed with exit code: 1")
+    process.returncode = 2316632070
+    monkeypatch.setattr(bootstrap.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(bootstrap, "_wsl_diagnostic", lambda: "WSL status")
+    with pytest.raises(BackendError, match="WSL prerequisite failed") as error:
+        bootstrap._install_with_winget("winget.exe", lambda update: None, timeout=5)
+    assert "0x8A150006" in str(error.value)
+
+
+def test_installer_diagnostics_ignore_old_logs(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.delenv("ProgramData", raising=False)
+    log = tmp_path / "Docker" / "install-log.txt"
+    log.parent.mkdir()
+    log.write_text("Stale installer error", encoding="utf-8")
+    diagnostic = bootstrap._installer_diagnostic(time.time() + 10)
+    assert "Stale installer error" not in diagnostic
+    assert "interactively" in diagnostic
 
 
 @pytest.mark.asyncio
@@ -276,9 +328,7 @@ async def test_backend_reports_strictly_increasing_mcp_progress(
             bootstrap.DockerRuntimeProgress(
                 "working", "downloading", "Downloading Docker...", 1.0
             ),
-            bootstrap.DockerRuntimeProgress(
-                "ready", "ready", "Docker is ready.", 4.0
-            ),
+            bootstrap.DockerRuntimeProgress("ready", "ready", "Docker is ready.", 4.0),
         ):
             report(update)
 

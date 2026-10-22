@@ -17,6 +17,12 @@ A VM for your agent. And for you.
 
 ### Local Docker (default)
 
+`COMPUTER_ID` defaults to `agent-workstation` when omitted. Set it explicitly to
+keep using a named computer or to create a separate one. On a fresh Windows PC,
+setup prepares WSL 2 before installing Docker Desktop. Approve the Windows
+administrator prompt if shown; if a restart is required, restart Windows, reopen
+your MCP client, and retry. See [Windows first-use validation](docs/windows-first-run.md).
+
 ```json
 {
   "mcpServers": {

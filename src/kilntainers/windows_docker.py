@@ -25,6 +25,7 @@ from typing import Any, cast
 
 from kilntainers.config import env_flag
 from kilntainers.errors import BackendError
+from kilntainers.windows_wsl import decode_windows_output, prepare_windows_wsl
 
 DOCKER_DESKTOP_PACKAGE = "Docker.DockerDesktop"
 DOCKER_INSTALL_TIMEOUT_SECONDS = 1_200
@@ -143,10 +144,7 @@ def _docker_desktop_candidates() -> list[Path]:
     program_files = os.getenv("ProgramFiles")
     if local_app_data:
         candidates.append(
-            Path(local_app_data)
-            / "Programs"
-            / "DockerDesktop"
-            / "Docker Desktop.exe"
+            Path(local_app_data) / "Programs" / "DockerDesktop" / "Docker Desktop.exe"
         )
     if program_files:
         candidates.append(
@@ -272,6 +270,7 @@ def _install_with_winget(
     timeout: int,
 ) -> None:
     """Install per-user Docker Desktop and stream observable WinGet state."""
+    started_at = time.time()
     command = [
         winget,
         "install",
@@ -285,7 +284,7 @@ def _install_with_winget(
         "--accept-source-agreements",
         "--disable-interactivity",
         "--override",
-        "install --user --quiet --accept-license",
+        "install --user --quiet --accept-license --backend=wsl-2",
     ]
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
@@ -366,12 +365,49 @@ def _install_with_winget(
 
     return_code = process.wait(timeout=5)
     if return_code != 0:
-        detail = output.decode("utf-8", errors="replace").strip()
+        detail = decode_windows_output(bytes(output))
         detail = detail[-2_000:] if detail else "WinGet returned no diagnostic output."
         raise BackendError(
             f"WinGet could not install {DOCKER_DESKTOP_PACKAGE} "
-            f"(exit {return_code}).\n{detail}"
+            f"(exit {return_code}, 0x{return_code & 0xFFFFFFFF:08X}).\n{detail}\n"
+            f"{_installer_diagnostic(started_at)}\nWSL status: {_wsl_diagnostic()}"
         )
+
+
+def _installer_diagnostic(started_at: float) -> str:
+    """Include only logs modified by this attempt, never a stale failure."""
+    candidates: list[Path] = []
+    for variable, directory in (
+        ("LOCALAPPDATA", "Docker"),
+        ("ProgramData", "DockerDesktop"),
+    ):
+        root = os.getenv(variable)
+        if root:
+            candidates.extend(
+                Path(root) / directory / name
+                for name in (
+                    "install-log.txt",
+                    "install-log-admin.txt",
+                    "install-log-user.txt",
+                )
+            )
+    diagnostics = []
+    for candidate in candidates:
+        try:
+            if candidate.stat().st_mtime < started_at - 2:
+                continue
+            with candidate.open("rb") as log:
+                log.seek(max(0, candidate.stat().st_size - 8_192))
+                detail = decode_windows_output(log.read())[-2_000:]
+            diagnostics.append(f"Docker installer log ({candidate}):\n{detail}")
+        except OSError:
+            continue
+    return "\n".join(diagnostics) or (
+        "Docker did not provide a readable current installer log. Check "
+        "%LOCALAPPDATA%\\Docker\\install-log*.txt and "
+        "%ProgramData%\\DockerDesktop\\install-log*.txt, or run Docker Desktop's "
+        "installer interactively to see its error."
+    )
 
 
 def _docker_ready(docker: Path) -> bool:
@@ -408,7 +444,11 @@ def _launch_docker_desktop(docker: Path, timeout: int) -> None:
         pass
 
     application = next(
-        (candidate for candidate in _docker_desktop_candidates() if candidate.is_file()),
+        (
+            candidate
+            for candidate in _docker_desktop_candidates()
+            if candidate.is_file()
+        ),
         None,
     )
     if application is None:
@@ -447,7 +487,7 @@ def _wsl_diagnostic() -> str:
         )
     except (OSError, subprocess.TimeoutExpired):
         return "Check that WSL 2 and hardware virtualization are enabled."
-    detail = result.stdout.decode("utf-8", errors="replace").strip()
+    detail = decode_windows_output(result.stdout)
     return detail or "Check that WSL 2 and hardware virtualization are enabled."
 
 
@@ -471,6 +511,7 @@ def prepare_windows_docker_runtime(
         )
     )
     docker, path_missing = _find_docker(engine)
+    prerequisites_prepared = False
     if docker is None:
         try:
             auto_install = env_flag("AUTO_INSTALL_DOCKER", default=True)
@@ -488,6 +529,18 @@ def prepare_windows_docker_runtime(
                 "App Installer (which provides winget), or install Docker Desktop from "
                 "https://docs.docker.com/desktop/setup/install/windows-install/."
             )
+        if host is None:
+            prepare_windows_wsl(
+                lambda message: report(
+                    DockerRuntimeProgress(
+                        state="working",
+                        phase="prerequisites",
+                        message=message,
+                        progress=0.5,
+                    )
+                )
+            )
+            prerequisites_prepared = True
         report(
             DockerRuntimeProgress(
                 state="working",
@@ -535,6 +588,23 @@ def prepare_windows_docker_runtime(
         "DOCKER_START_TIMEOUT",
         DOCKER_START_TIMEOUT_SECONDS,
     )
+    local_app_data = os.getenv("LOCALAPPDATA")
+    per_user_install = local_app_data is not None and docker.is_relative_to(
+        Path(local_app_data) / "Programs" / "DockerDesktop"
+    )
+    # Existing all-users installations may intentionally use Hyper-V. Only
+    # prepare WSL for the per-user installation mode that requires it.
+    if not prerequisites_prepared and per_user_install:
+        prepare_windows_wsl(
+            lambda message: report(
+                DockerRuntimeProgress(
+                    state="working",
+                    phase="prerequisites",
+                    message=message,
+                    progress=2.5,
+                )
+            )
+        )
     report(
         DockerRuntimeProgress(
             state="working",
