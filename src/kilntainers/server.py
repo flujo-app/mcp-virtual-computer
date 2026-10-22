@@ -1245,7 +1245,8 @@ def create_server(
     ) -> CallToolResult:
         """Return lazy host-runtime setup state for the computer App."""
         session = _session_from_context(ctx)
-        backend.start_runtime_preparation()
+        # The App polls this every second. Only an explicit computer/tool action
+        # may retry failed installation; polling must preserve the failure.
         runtime = backend.runtime_status()
         sandbox = registry.peek(config.computer_id)
         if session is not None and runtime.get("runtime_state") == "ready":

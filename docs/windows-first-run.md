@@ -60,6 +60,8 @@ never arbitrary fork pull requests.
 6. Restore the clean checkpoint. Repeat with UAC cancelled, firmware/nested
    virtualization disabled, and with old WSL requiring an update. Each must show
    a useful recovery action; after repair, retry must reach the same success gate.
+   Leave the failed UI open for a minute: status polling must preserve the error
+   without launching another installer or UAC prompt. Retry only on explicit use.
 7. Separately check existing Docker Desktop stopped/running, and an all-users
    Hyper-V installation. Existing working engines must not trigger reinstallation
    or unnecessary WSL changes.
@@ -73,6 +75,12 @@ The screenshot shows WinGet exit `2316632070` (`0x8A150006`) and Docker's instal
 exit `1`, after a verified download. Those codes do not identify the underlying
 Docker failure. The new error includes current Docker installer log tails and
 correctly decodes WSL output, including UTF-16LE on Windows.
+
+The provided outer launcher log recorded 56 failed launches between 21:26:49 and
+21:31:24 UTC on 2026-10-22. Extraction and disk checks succeeded. This exposed a
+separate retry loop: the App's one-second runtime-status poll restarted failed
+installation. Status polling now leaves the failure intact. The child installer's
+log is still required to identify why its first installation failed.
 
 For the existing installation, run `scripts/windows-first-use-diagnostics.ps1`
 in PowerShell on the affected PC. It is read-only and prints Windows/WSL state and
