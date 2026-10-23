@@ -8,6 +8,18 @@ import pytest
 from kilntainers import windows_wsl as wsl
 from kilntainers.errors import BackendError
 
+_REAL_MACHINE_STATUS = wsl._machine_status
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(wsl.sys.platform != "win32", reason="Requires Windows PowerShell and CIM")
+def test_machine_status_query_executes_on_windows():
+    """Exercise the real read-only script so PowerShell syntax errors are caught."""
+    status = _REAL_MACHINE_STATUS()
+    assert isinstance(status["hypervisor"], bool)
+    assert isinstance(status["virtualization"], list)
+    assert "virtualMachinePlatform" in status
+
 
 @pytest.fixture(autouse=True)
 def windows(monkeypatch: pytest.MonkeyPatch):

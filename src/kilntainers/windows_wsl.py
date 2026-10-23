@@ -67,7 +67,7 @@ def _powershell(script: str, timeout: int = 30) -> dict[str, Any]:
 
 
 def _machine_status() -> dict[str, Any]:
-    return _powershell("""+$ErrorActionPreference = 'Stop'
+    return _powershell("""$ErrorActionPreference = 'Stop'
 $computer = Get-CimInstance Win32_ComputerSystem
 $processors = @(Get-CimInstance Win32_Processor)
 $feature = Get-CimInstance Win32_OptionalFeature -Filter "Name='VirtualMachinePlatform'"
