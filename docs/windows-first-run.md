@@ -45,7 +45,7 @@ never arbitrary fork pull requests.
    `https://github.com/flujo-app/mcp-virtual-computer` through the GitHub UI.
    Confirm the detected command is `uvx`, no npm install/build steps are requested,
    and the documented environment values are retained. For an unpublished MCP
-   candidate, use its built wheel explicitly; do not mistake the old PyPI version
+   candidate, use its pinned Git source or built wheel explicitly; do not mistake the old PyPI version
    for the candidate.
 3. Also connect the candidate with `COMPUTER_ID` absent. Confirm initialization and
    tool listing succeed before Docker exists. First use (`computer_ui`, then
@@ -90,3 +90,25 @@ For the existing installation, run `scripts/windows-first-use-diagnostics.ps1`
 in PowerShell on the affected PC. It is read-only and prints Windows/WSL state and
 the recent Docker installer errors. Check the output before sharing it; log paths
 can include the Windows user name. It does not install, restart, or upload anything.
+
+## Observed clean-VM acceptance (2026-10-22)
+
+An official, SHA-256-verified Windows 11 Pro x64 ISO (build 26300.9457) was
+installed in a dedicated Hyper-V VM with nested virtualization and UAC enabled.
+The baseline had neither WSL nor Docker Desktop. FLUJO ran in an interactive,
+non-elevated user session. Adding the public GitHub URL detected `uvx` and retained
+the documented environment, without npm steps for this MCP.
+
+The automatic bootstrap installed WSL 3.0.3 and Docker Desktop; after a Windows
+restart, `docker info` identified a Linux engine. Candidate `701d7ff` initialized
+with `COMPUTER_ID` omitted, listed 20 tools, returned a real Xfce screenshot,
+created and read a file through `terminal_execute`, and retained the file across
+an MCP server restart. This was a real Docker runtime, not a mocked backend.
+
+The first bootstrap used `cd366ae` and exposed the exit-0/pending-restart issue
+above. The corrected reboot gate in `701d7ff` has regression coverage using that
+captured state; a second complete pristine installation of that revision was not
+run. UAC cancellation was exercised without automatic retry. Disabled firmware
+virtualization, old WSL, and existing all-users Hyper-V installations remain
+release matrix cases. The original friend's child-installer error remains
+unconfirmed.
