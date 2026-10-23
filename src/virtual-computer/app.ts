@@ -1639,6 +1639,9 @@ async function callManualTool<T>(name: string, args: ToolArguments): Promise<T> 
 
 async function pollRuntimeStatus() {
   if (!manual.hostConnected || runtimePollInFlight) return;
+  // Legacy hosts without runtime_status use computer_ui, which can start setup.
+  // Once that reports a failure, wait for an explicit action instead of retrying.
+  if (!runtimeStatusToolAvailable && state.runtimeState === "failed") return;
   runtimePollInFlight = true;
   try {
     const call = (name: string) => directClient

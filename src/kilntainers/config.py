@@ -54,7 +54,7 @@ class ServerConfig:
     workspace_directory: str = "/workspace"
 
     # A server process owns exactly one persistent computer. The CLI replaces
-    # this programmatic default with the required COMPUTER_ID environment value.
+    # this programmatic default with COMPUTER_ID, or "agent-workstation" when unset.
     computer_id: str = "virtual-computer"
     desktop_environment: bool = True
     network_access: bool = True

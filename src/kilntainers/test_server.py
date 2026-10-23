@@ -29,6 +29,21 @@ from kilntainers.server import (
 # --- Test Configuration ---
 
 
+async def test_runtime_status_polling_does_not_restart_failed_install(monkeypatch):
+    backend = MockBackend(BackendConfig())
+    start = MagicMock()
+    monkeypatch.setattr(backend, "start_runtime_preparation", start)
+    monkeypatch.setattr(backend, "runtime_status", lambda: {
+        "runtime_state": "failed", "runtime_error": "Installer exited with status 1",
+    })
+    server = create_server(backend, ServerConfig())
+    status = next(tool for tool in server._tool_manager.list_tools() if tool.name == "runtime_status")
+    for _ in range(56):
+        result = await status.fn()
+        assert result.structuredContent["runtime_state"] == "failed"
+    start.assert_not_called()
+
+
 def test_computer_ui_url_uses_standalone_dashboard_for_stdio() -> None:
     assert _computer_ui_url(ServerConfig()) == "http://127.0.0.1:8435/dashboard.html"
 

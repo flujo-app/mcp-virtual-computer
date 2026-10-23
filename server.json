@@ -43,11 +43,11 @@
         },
         {
           "name": "COMPUTER_ID",
-          "description": "Stable identity of the one persistent computer.",
+          "description": "Stable identity of the one persistent computer. Defaults to agent-workstation; set a different ID for a separate computer.",
           "default": "agent-workstation",
           "placeholder": "agent-workstation",
           "format": "string",
-          "isRequired": true,
+          "isRequired": false,
           "isSecret": false
         },
         {
