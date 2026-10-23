@@ -67,7 +67,7 @@ def _powershell(script: str, timeout: int = 30) -> dict[str, Any]:
 
 
 def _machine_status() -> dict[str, Any]:
-    return _powershell("""$ErrorActionPreference = 'Stop'
+    return _powershell(r"""$ErrorActionPreference = 'Stop'
 $computer = Get-CimInstance Win32_ComputerSystem
 $processors = @(Get-CimInstance Win32_Processor)
 $feature = Get-CimInstance Win32_OptionalFeature -Filter "Name='VirtualMachinePlatform'"
@@ -75,8 +75,17 @@ $feature = Get-CimInstance Win32_OptionalFeature -Filter "Name='VirtualMachinePl
     hypervisor = [bool]$computer.HypervisorPresent
     virtualization = @($processors | ForEach-Object { $_.VirtualizationFirmwareEnabled })
     virtualMachinePlatform = $feature.InstallState
+    rebootPending = [bool](Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending')
 } | ConvertTo-Json -Compress
 """)
+
+
+def _require_completed_restart(machine: dict[str, Any]) -> None:
+    if machine.get("rebootPending"):
+        raise BackendError(
+            "Windows has a pending prerequisite restart. Restart Windows, reopen "
+            "FLUJO, and retry the computer before installing Docker Desktop."
+        )
 
 
 def _wsl_version() -> tuple[int, int, int] | None:
@@ -142,6 +151,7 @@ def prepare_windows_wsl(report: Callable[[str], None]) -> None:
         )
     report("Checking WSL 2 and hardware virtualization...")
     machine = _machine_status()
+    _require_completed_restart(machine)
     firmware = machine.get("virtualization", [])
     if (
         not machine.get("hypervisor")
@@ -182,6 +192,7 @@ def prepare_windows_wsl(report: Callable[[str], None]) -> None:
                 "terminal to see Windows' diagnostic, then restart if requested and retry."
             )
         machine = _machine_status()
+        _require_completed_restart(machine)
         current = _wsl_version()
     if machine.get("virtualMachinePlatform") != 1 or not machine.get("hypervisor"):
         raise BackendError(

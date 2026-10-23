@@ -19,6 +19,7 @@ def test_machine_status_query_executes_on_windows():
     assert isinstance(status["hypervisor"], bool)
     assert isinstance(status["virtualization"], list)
     assert "virtualMachinePlatform" in status
+    assert isinstance(status["rebootPending"], bool)
 
 
 @pytest.fixture(autouse=True)
@@ -92,6 +93,33 @@ def test_old_wsl_updates(monkeypatch, windows):
     monkeypatch.setattr(wsl, "_wsl_version", lambda: next(versions))
     wsl.prepare_windows_wsl(lambda message: None)
     windows.assert_called_once_with(install=False)
+
+
+def test_enabled_platform_in_hyperv_guest_still_requires_pending_restart(monkeypatch, windows):
+    monkeypatch.setattr(
+        wsl,
+        "_machine_status",
+        lambda: {
+            "hypervisor": True,
+            "virtualization": [True],
+            "virtualMachinePlatform": 1,
+            "rebootPending": True,
+        },
+    )
+    with pytest.raises(BackendError, match="Restart Windows"):
+        wsl.prepare_windows_wsl(lambda message: None)
+    windows.assert_not_called()
+
+
+def test_wsl_exit_zero_does_not_override_windows_pending_restart(monkeypatch, windows):
+    states = iter([
+        {"hypervisor": True, "virtualMachinePlatform": 2, "rebootPending": False},
+        {"hypervisor": True, "virtualMachinePlatform": 1, "rebootPending": True},
+    ])
+    monkeypatch.setattr(wsl, "_machine_status", lambda: next(states))
+    with pytest.raises(BackendError, match="Restart Windows"):
+        wsl.prepare_windows_wsl(lambda message: None)
+    windows.assert_called_once_with(install=True)
 
 
 @pytest.mark.parametrize(

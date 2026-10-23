@@ -53,6 +53,10 @@ never arbitrary fork pull requests.
 4. Accept the native WSL administrator prompt. If Windows requires a reboot, the
    run is **pending**, not passed. Reboot manually, reopen FLUJO, and retry. Setup
    must not force a restart or keep downloading Docker while WSL is unavailable.
+   Check Windows' pending CBS restart both before and after WSL setup. In a clean
+   Windows 11 Hyper-V guest, WSL 3.0.3 returned exit 0 and CIM reported the platform
+   enabled while a reboot was still pending. The guest already reported a
+   hypervisor, so that flag alone could not prove WSL was ready.
 5. Require `docker info` to identify a Linux engine, a real Xfce screenshot from
    `look_at_screen`, and `terminal_execute` successfully creating/reading a file
    inside the computer. Reconnect and verify that file persists. A successful
